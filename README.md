@@ -1,5 +1,207 @@
 # CAUSA
 
+> **Distributed Systems Control Plane, Transparent Transport Interceptor, and Time‑Travel Debugger for Multi‑Agent Coding Swarms.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Next.js 14](https://img.shields.io/badge/Next.js-14-black)](https://nextjs.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg)](https://fastapi.tiangolo.com)
+[![Architecture: Distributed Actors](https://img.shields.io/badge/Architecture-Distributed%20Actors-orange.svg)](#)
+
+---
+
+## Executive Summary
+
+Causa provides a **debuggable distributed program model** for AI coding swarms. It inserts a control plane that intercepts all agent‑system interactions, records causal actions, and supplies deterministic concurrency controls and time‑travel debugging. This eliminates silent context poisoning, un‑recoverable bad decisions, and destructive file‑level races that plague existing multi‑agent frameworks.
+
+---
+
+## System Architecture
+
+```mermaid
+flowchart TD
+    Prompt[Developer Goal or Prompt] --> Astra
+
+    subgraph ControlPlane [CAUSA SYSTEM CONTROL PLANE]
+        Astra[Astra: Swarm Orchestrator]
+        Ferry[Ferry: Transport Interceptor]
+        Fullerence[Fullerence: Dual‑Layer Causal DAG]
+        Debugger[Debugger: Time‑Travel Engine]
+
+        Astra -->|Spawns Git Worktrees & PTY| Ferry
+        Ferry -->|Intercepts MCP & Extracts AST Diffs| Fullerence
+        Fullerence -->|Causal State & Dependency Feed| Debugger
+        Debugger -->|Causal Breakpoints & Rollback| Astra
+    end
+
+    Debugger -->|WebSocket Real‑Time Telemetry| UI[Causa Visual Debugger UI]
+```
+
+---
+
+## Core Components
+
+### Astra – Swarm Orchestrator
+*Manages process lifecycles, high‑level planning, and model routing.*
+- Decomposes goals into dependency‑directed sub‑tasks.
+- Routes work to appropriate model tier (Heavy, Fast Cloud, Local SLM).
+- Generates typed AST skeletons to prune context tokens.
+- Executes each agent in an isolated Git worktree.
+- Performs pre‑commit verification and atomic merges.
+
+### Ferry – Transport Interceptor & Pre‑Commit Engine
+*Proxies MCP JSON‑RPC and PTY streams, enforcing safety.*
+- Enforces capability manifests and ACLs.
+- Provides deterministic read/write leases per file.
+- Runs dry‑run AST parsing and syntax validation.
+- Emits interface diffs to a shared SQLite blackboard.
+
+### Fullerence – Dual‑Layer Causal & AST Knowledge Substrate
+*Persistently records every action and its semantic effect.*
+- Relational causal DAG links prompts, tool calls, file mutations, and test results.
+- AST Interface Graph maps symbols and dependencies to causal nodes.
+- Synchronises worktree Git hashes and file diffs across agents.
+
+### Debugger – Distributed Flight Recorder & Time‑Travel Engine
+*Enables causal breakpoints, rollback, and root‑cause analysis.*
+- Stops execution when invariants or tests fail.
+- Traverses the DAG backward to locate the first bad decision.
+- Rewinds filesystem and Git state, then branches forward with alternative constraints.
+
+### Frontend – Visual Flight Recorder UI (Next.js 14)
+*Interactive web UI for real‑time observability.*
+- Causal DAG visualiser (React Flow) with health‑state colouring.
+- Playback bar for scrubbing execution history.
+- Token‑consumption metrics per model tier.
+- Direct node editing, forking, and blackboard inspection.
+
+---
+
+## Tech Stack
+
+| Layer | Technology | Rationale |
+|---|---|---|
+| **Backend Core** | Python 3.11+ / asyncio | High‑performance async runtime with OS/PTY primitives |
+| **API Server** | FastAPI + WebSockets | Sub‑millisecond real‑time event streaming |
+| **Database** | SQLite (WAL) + SQLAlchemy | Zero‑configuration, high‑concurrency local storage |
+| **DAG Computation** | NetworkX | Robust graph traversal for causal analysis |
+| **Process Sandboxing** | pexpect / pty + Git Worktrees | Isolated filesystem per agent |
+| **AST Parsing** | Tree‑sitter / Python ast | Language‑agnostic interface diff extraction |
+| **Local SLM** | Ollama (qwen2.5‑coder / phi3) | Offline, zero‑cost routing and housekeeping |
+| **Frontend App** | Next.js 14 + TypeScript | Component‑driven, high‑performance UI |
+| **Graph Visualization** | React Flow | Interactive node‑link visualiser |
+| **UI Components** | Tailwind CSS + shadcn/ui | Modern responsive developer‑tool aesthetics |
+
+---
+
+## Monorepo Directory Structure
+
+```text
+causa/
++-- packages/
+|   +-- astra/          # Swarm orchestrator & process supervisor
+|   |   +-- planner.py
+|   |   +-- worktree.py
+|   |   +-- pty_runner.py
+|   +-- ferry/          # Transport proxy & pre‑commit engine
+|   |   +-- proxy.py
+|   |   +-- lock_manager.py
+|   |   +-- ast_diff.py
+|   |   +-- blackboard.py
+|   +-- fullerence/     # Causal DAG & persistence engine
+|   |   +-- graph.py
+|   |   +-- storage.py
+|   +-- debugger/       # Time‑travel & root‑cause analysis
+|   |   +-- localization.py
+|   |   +-- invalidation.py
+|   |   +-- breakpoints.py
+|   +-- slm/            # Local SLM client (Ollama integration)
+|       +-- client.py
++-- apps/
+|   +-- api/            # FastAPI control plane & WebSocket hub
+|   |   +-- main.py
+|   |   +-- routers/    # REST endpoints (agents, dag, leases, playback)
+|   +-- ui/             # Next.js 14 visual debugger
+|       +-- app/page.tsx
+|       +-- components/dag/
+|       +-- components/panels/
++-- scripts/            # Seed data, benchmark tests, demo scenarios
++-- tests/              # Unit and integration test suites
++-- .gitignore
++-- README.md
+``` 
+
+---
+
+## Quick Start
+
+### Prerequisites
+- Python 3.11+
+- Node.js 18+ and pnpm
+- Git 2.30+
+- (Optional) Ollama for local SLM routing: `ollama pull qwen2.5-coder:7b`
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/codebreaker77/CAUSA.git
+cd CAUSA
+```
+
+### 2. Backend Setup
+```bash
+python -m venv .venv
+# Windows PowerShell
+.\.venv\Scripts\activate
+# Unix/macOS
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3. Frontend Setup (Dashboard)
+```bash
+cd apps/dashboard
+npm install
+```
+
+### 4. Run Locally
+```bash
+# Terminal 1: Start the control‑plane API
+uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --reload
+
+# Terminal 2: Start the dashboard UI
+cd apps/dashboard
+npm run dev
+```
+Open **http://localhost:3000** in a browser to explore the DAG, blackboard, and playback controls.
+
+---
+
+## How Causa Compares
+
+| Feature | Raw Agent Harnesses (Aider, Picode, SWE‑bench) | Multi‑Agent Frameworks (AutoGen, CrewAI) | **Causa** |
+|---|---|---|---|
+| **Execution Paradigm** | Linear append‑only transcript | Turn‑based conversational chat | **Nonlinear Causal DAG** |
+| **Concurrency Safety** | None (collisions likely) | Soft prompt coordination | **Deterministic Pre‑Commit Leases** |
+| **Filesystem Isolation** | Shared single folder | Shared or container‑based | **Per‑agent Git Worktrees** |
+| **Interface Awareness** | Full file injection (token heavy) | Raw string passing | **AST Skeletons & Blackboard** |
+| **Failure Recovery** | Retry loop (compounding errors) | Restart session | **Counterfactual Time‑Travel Rewind** |
+| **Error Diagnostics** | Manual terminal log inspection | Transcript scrolling | **First‑Bad‑Decision Localization** |
+| **Cross‑Agent Bleed** | Undetected cascading errors | Silent prompt pollution | **Transitive Causal Invalidation** |
+
+---
+
+## License
+
+This project is licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
+
+---
+
+## Authors & Contributors
+
+- **Vismay Shrouty** ([@codebreaker77](https://github.com/codebreaker77)) – Architecture & System Design
+- Additional contributors are listed in the repository’s `CONTRIBUTORS` file.
+
+
 > **Distributed Systems Control Plane, Transparent Transport Interceptor, and Time-Travel Debugger for Multi-Agent Coding Swarms.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -202,10 +404,10 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install fastapi uvicorn sqlalchemy networkx pexpect gitpython aiohttp websockets
 ```
 
-### 3. Frontend Setup
+### 3. Frontend Setup (Dashboard)
 ```bash
-cd apps/ui
-pnpm install
+cd apps/dashboard
+npm install
 ```
 
 ### 4. Run Causa Locally
@@ -213,9 +415,9 @@ pnpm install
 # Terminal 1: Start Causa Control Plane API
 uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --reload
 
-# Terminal 2: Start Causa Visual Debugger UI
-cd apps/ui
-pnpm dev
+# Terminal 2: Start the dashboard UI
+cd apps/dashboard
+npm run dev
 ```
 Open **http://localhost:3000** in your browser.
 
