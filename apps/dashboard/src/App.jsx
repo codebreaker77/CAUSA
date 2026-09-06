@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback } from "react";
+import React, { useMemo, useState, useCallback, useEffect } from "react";
 import {
   Activity, AlertTriangle, ArrowRight, Check, ChevronDown,
   ChevronRight, Code2, Copy, Cpu, Database, Eye, FileCode2,
