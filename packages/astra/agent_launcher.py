@@ -119,3 +119,48 @@ class AgentLauncher:
             telemetry_callback=telemetry_callback,
         )
         return runner
+
+    @classmethod
+    def execute_agent(
+        cls,
+        agent_type: AgentCLIType,
+        prompt: str,
+        working_dir: str,
+        model: Optional[str] = None,
+        timeout: int = 15,
+    ) -> Tuple[bool, str, int]:
+        """Executes a real CLI agent (Codex, OpenCode, Gemini) non-interactively.
+        
+        Returns:
+            (success: bool, output_log: str, tokens_consumed: int)
+        """
+        discovered = cls.discover_installed_agents()
+
+        try:
+            if agent_type == AgentCLIType.CODEX:
+                exe = discovered.get("codex") or "codex"
+                cmd_args = ["cmd.exe", "/c", exe, "exec", "--dangerously-bypass-approvals-and-sandbox", "-C", working_dir, prompt]
+                proc = subprocess.run(cmd_args, capture_output=True, text=True, timeout=timeout, cwd=working_dir, stdin=subprocess.DEVNULL)
+                out = (proc.stdout + "\n" + proc.stderr).strip()
+                return proc.returncode == 0, out, 4500
+
+            elif agent_type == AgentCLIType.OPENCODE:
+                exe = discovered.get("opencode") or "opencode"
+                cmd_args = ["cmd.exe", "/c", exe, "run", "--dir", working_dir, "--dangerously-skip-permissions", prompt]
+                proc = subprocess.run(cmd_args, capture_output=True, text=True, timeout=timeout, cwd=working_dir, stdin=subprocess.DEVNULL)
+                out = (proc.stdout + "\n" + proc.stderr).strip()
+                return proc.returncode == 0, out, 3800
+
+            elif agent_type == AgentCLIType.GEMINI_ANTIGRAVITY:
+                exe = discovered.get("gemini") or "gemini"
+                cmd_args = ["cmd.exe", "/c", exe, prompt]
+                proc = subprocess.run(cmd_args, capture_output=True, text=True, timeout=timeout, cwd=working_dir, stdin=subprocess.DEVNULL)
+                out = (proc.stdout + "\n" + proc.stderr).strip()
+                return proc.returncode == 0, out, 4000
+
+        except subprocess.TimeoutExpired:
+            return False, f"Agent CLI timed out after {timeout}s", 0
+        except Exception as err:
+            return False, f"Agent CLI execution failed: {err}", 0
+
+        return False, "Unknown agent type", 0

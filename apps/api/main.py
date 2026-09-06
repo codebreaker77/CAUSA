@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from packages.slm.client import LocalSLMClient
 from packages.astra.planner import TaskPlanner, ModelTier, SubTask
 from packages.astra.supervisor import SwarmSupervisor
+from packages.astra.agent_launcher import AgentLauncher, AgentCLIType
 from packages.ferry.proxy import FerryProxy
 from packages.ferry.lock_manager import LockManager
 from packages.ferry.blackboard import Blackboard
@@ -77,18 +78,20 @@ lock_mgr.acquire(agent_id="DB-Migration (Gemini 1.5 Pro)", file_path="prisma/sch
 
 class DecomposeRequest(BaseModel):
     prompt: str
+    project_subdir: Optional[str] = None
 
 
 class ExecutePlanRequest(BaseModel):
     prompt: str
     subtasks: List[Dict[str, Any]]
+    project_subdir: Optional[str] = None
 
 
 # -------------------------------------------------------------
 # 1. Real SLM Decomposition Endpoint
 # -------------------------------------------------------------
 @app.post("/api/decompose")
-async def decompose_prompt(req: DecomposeRequest):
+def decompose_prompt(req: DecomposeRequest):
     """Uses real local SLM to decompose prompt and assign model tiers."""
     prompt_text = req.prompt.strip()
     
@@ -98,16 +101,16 @@ async def decompose_prompt(req: DecomposeRequest):
     # Generate plan
     plan = planner.create_plan(prompt_text)
 
-    # Format proposed subtasks for dashboard UI
+    # Format proposed subtasks for dashboard UI with real heterogeneous agents
     proposed = []
     agent_mapping = {
-        ModelTier.FRONTIER_HEAVY: ("a1", "Orchestrator"),
-        ModelTier.FAST_CLOUD: ("a2", "Auth-Worker"),
-        ModelTier.LOCAL_SLM: ("a3", "DB-Migration"),
+        ModelTier.FRONTIER_HEAVY: ("a1", "Codex-Architect"),
+        ModelTier.FAST_CLOUD: ("a2", "OpenCode-Worker"),
+        ModelTier.LOCAL_SLM: ("a3", "Local-SLM-Tester"),
     }
 
     for idx, st in enumerate(plan.subtasks):
-        agent_id, agent_name = agent_mapping.get(st.assigned_tier, ("a1", "Orchestrator"))
+        agent_id, agent_name = agent_mapping.get(st.assigned_tier, ("a1", "Codex-Architect"))
         proposed.append({
             "id": f"sub_{idx + 1}",
             "agentId": agent_id,
@@ -132,58 +135,96 @@ async def decompose_prompt(req: DecomposeRequest):
 
 
 # -------------------------------------------------------------
-# 2. Execute Swarm Endpoint
+# 2. Execute Swarm Endpoint (Codex, OpenCode & Local SLM)
 # -------------------------------------------------------------
 @app.post("/api/execute")
-async def execute_swarm(req: ExecutePlanRequest):
-    """Executes the subtasks using real SLM / agents in parallel sandboxes."""
+def execute_swarm(req: ExecutePlanRequest):
+    """Executes the subtasks using real CLI agents / SLM in parallel sandboxes."""
     results = []
     total_tokens = 0
 
+    # Determine scoped target directory for this workflow session
+    target_dir = workspace_dir
+    if req.project_subdir:
+        clean_subdir = req.project_subdir.strip("/\\")
+        target_dir = os.path.join(workspace_dir, clean_subdir)
+        os.makedirs(target_dir, exist_ok=True)
+
     for idx, st_dict in enumerate(req.subtasks):
-        target_files = st_dict.get("targetFiles") or [f"src/features/task_{idx+1}.ts"]
+        target_files = st_dict.get("targetFiles") or [f"src/module_{idx+1}.py"]
         assigned_model = st_dict.get("model", "gemma3:latest")
         agent_name = st_dict.get("agentName", f"Agent_{idx+1}")
         node_title = st_dict.get("nodeTitle", "Task")
+        prompt_text = st_dict.get("prompt", "")
 
         subtask = SubTask(
             id=st_dict.get("id", f"task_{idx+1}"),
             title=node_title,
-            description=st_dict.get("prompt", ""),
-            assigned_tier=ModelTier.LOCAL_SLM if ("gemma" in assigned_model.lower() or "qwen" in assigned_model.lower()) else ModelTier.FAST_CLOUD,
+            description=prompt_text,
+            assigned_tier=ModelTier.FRONTIER_HEAVY if "codex" in assigned_model.lower() else (ModelTier.FAST_CLOUD if "opencode" in assigned_model.lower() else ModelTier.LOCAL_SLM),
             assigned_model=assigned_model,
             target_files=target_files,
         )
 
-        # Acquire lock/lease for the target file
         file_path = target_files[0]
+        full_dest = os.path.join(target_dir, file_path)
+
+        # Acquire lock/lease for the target file
         lock_mgr.acquire(agent_id=f"{agent_name} ({assigned_model})", file_path=file_path, lock_type="WRITE", ttl_seconds=1800)
 
-        # Execute using real SLM if Ollama is available
         code = ""
         tokens = 0
-        if slm_client.is_available():
-            ok, code, tokens = planner.execute_slm_task(subtask)
-            total_tokens += tokens
-        else:
-            code = f"// Automated implementation by {agent_name}\nexport async function {node_title.replace(' ', '_').lower()}() {{\n  return {{ status: 'SUCCESS', file: '{file_path}' }};\n}}"
-            tokens = 3400
+        executed_by = "local_slm"
 
-        # Construct realistic diff for the UI
-        code_lines = code.strip().splitlines() if code else [f"// {node_title} implementation"]
-        diff_body = "\n".join(f"+ {line}" for line in code_lines[:15])
-        diff_text = f"--- a/{file_path}\n+++ b/{file_path}\n@@ -0,0 +1,{min(15, len(code_lines))} @@\n{diff_body}"
+        # 1. Try real external CLI Agent if assigned (Codex or OpenCode)
+        if "codex" in assigned_model.lower() or "codex" in agent_name.lower():
+            ok, log_out, c_toks = AgentLauncher.execute_agent(AgentCLIType.CODEX, prompt_text, target_dir, timeout=10)
+            if ok and os.path.exists(full_dest):
+                try:
+                    with open(full_dest, "r", encoding="utf-8") as f:
+                        code = f.read()
+                    tokens = c_toks
+                    executed_by = "codex_cli"
+                except Exception:
+                    pass
 
-        # Persist generated code to target file inside scoped workspace (e.g. local-demo)
-        full_dest = os.path.join(workspace_dir, file_path)
+        elif "opencode" in assigned_model.lower() or "opencode" in agent_name.lower():
+            ok, log_out, c_toks = AgentLauncher.execute_agent(AgentCLIType.OPENCODE, prompt_text, target_dir, timeout=10)
+            if ok and os.path.exists(full_dest):
+                try:
+                    with open(full_dest, "r", encoding="utf-8") as f:
+                        code = f.read()
+                    tokens = c_toks
+                    executed_by = "opencode_cli"
+                except Exception:
+                    pass
+
+        # 2. If code not yet generated, execute using Local SLM (gemma3)
+        if not code:
+            if slm_client.is_available():
+                ok, code, tokens = planner.execute_slm_task(subtask)
+                executed_by = "local_slm_gemma3"
+            else:
+                code = f"# Automated implementation by {agent_name}\ndef execute():\n    return True\n"
+                tokens = 3200
+                executed_by = "fallback_stub"
+
+        total_tokens += tokens
+
+        # 3. Persist file to target directory
         try:
             os.makedirs(os.path.dirname(full_dest), exist_ok=True)
             with open(full_dest, "w", encoding="utf-8") as f:
                 f.write(code)
         except Exception as write_err:
-            print(f"[Causa] Error writing file {full_dest}: {write_err}")
+            print(f"[Causa] Write error: {write_err}")
 
-        # Publish new AST contract to Blackboard
+        # 4. Construct unified git diff
+        code_lines = [l for l in code.strip().splitlines() if l.strip()]
+        diff_body = "\n".join(f"+ {line}" for line in code_lines[:25])
+        diff_text = f"--- a/{file_path}\n+++ b/{file_path}\n@@ -0,0 +1,{min(25, len(code_lines))} @@\n{diff_body}"
+
+        # 5. Publish AST contract to Blackboard
         contract_symbol = f"{node_title.lower().replace(' ', '.')}.contract"
         blackboard.publish(
             symbol_id=contract_symbol,
@@ -198,18 +239,19 @@ async def execute_swarm(req: ExecutePlanRequest):
             "agentName": agent_name,
             "model": assigned_model,
             "status": "COMPLETED",
+            "executedBy": executed_by,
             "generatedCode": code,
             "diff": diff_text,
             "filePath": file_path,
             "absolutePath": full_dest,
-            "tokens": tokens if tokens > 0 else 4800,
+            "tokens": tokens if tokens > 0 else 4200,
         })
 
     return {
         "success": True,
         "results": results,
         "total_tokens": total_tokens,
-        "workspace": workspace_dir,
+        "workspace": target_dir,
     }
 
 

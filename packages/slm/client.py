@@ -8,6 +8,7 @@ Executes real local SLM tasks:
 """
 
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Dict, Any, Optional, Tuple
@@ -144,7 +145,7 @@ class LocalSLMClient:
         )
         prompt = f"Task Title: {task_title}\nTask Description: {task_desc}"
 
-        res = self.generate(prompt=prompt, system_prompt=system_instruction, temperature=0.0)
+        res = self.generate(prompt=prompt, system_prompt=system_instruction, temperature=0.0, max_tokens=60)
         if res.success:
             try:
                 # Extract json from response

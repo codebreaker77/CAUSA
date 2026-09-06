@@ -507,6 +507,7 @@ const INITIAL_WORKFLOWS = [
   {
     id: "wf_oauth",
     title: "OAuth2 & Session Refactor",
+    projectDir: "",
     totalPrompts: 7,
     activePrompt: 3,
     stepsData: INITIAL_CAUSA_STEPS,
@@ -548,6 +549,7 @@ const INITIAL_WORKFLOWS = [
   {
     id: "wf_stripe",
     title: "Stripe Webhook Verification",
+    projectDir: "",
     totalPrompts: 2,
     activePrompt: 2,
     stepsData: [
@@ -742,6 +744,7 @@ export default function App() {
   const handleCreateWorkflow = () => {
     const newId = `wf_${Date.now().toString().slice(-5)}`;
     const title = newWfTitleInput.trim() || `Workflow Session #${workflows.length + 1}`;
+    const projectDir = title.toLowerCase().replace(/[^a-z0-9]/g, "_") || newId;
 
     let templateSteps = [];
     let templateEdges = [];
@@ -778,6 +781,7 @@ export default function App() {
     const newWf = {
       id: newId,
       title,
+      projectDir,
       totalPrompts: templateSteps.length ? Math.max(...templateSteps.map((s) => s.promptNum)) : 1,
       activePrompt: 1,
       stepsData: templateSteps,
@@ -854,7 +858,10 @@ export default function App() {
       const resp = await fetch("http://localhost:8000/api/decompose", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: userPromptInput }),
+        body: JSON.stringify({
+          prompt: userPromptInput,
+          project_subdir: activeWorkflow.projectDir || undefined
+        }),
       });
       if (resp.ok) {
         const data = await resp.json();
@@ -974,19 +981,22 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: userPromptInput,
-          subtasks: proposedSubtasks
+          subtasks: proposedSubtasks,
+          project_subdir: activeWorkflow.projectDir || undefined
         })
       });
       if (resp.ok) {
         const execData = await resp.json();
         if (execData.results && execData.results.length > 0) {
+          let firstNodeWithDiff = null;
           setStepsData((prev) =>
             prev.map((node) => {
               const matchedResult = execData.results.find((r, idx) => `s_sub_${nextPromptNum}_${idx}` === node.id);
               if (matchedResult) {
-                return {
+                const updatedNode = {
                   ...node,
                   diff: matchedResult.diff || node.diff,
+                  filePath: matchedResult.filePath || node.filePath || matchedResult.targetFile,
                   tokens: {
                     ...node.tokens,
                     count: matchedResult.tokens || node.tokens.count
@@ -995,11 +1005,19 @@ export default function App() {
                     ? `Real Model Output Generated (${matchedResult.tokens} tokens consumed). Contract published to Blackboard.`
                     : node.slmRationale
                 };
+                if (!firstNodeWithDiff && updatedNode.diff) {
+                  firstNodeWithDiff = updatedNode;
+                }
+                return updatedNode;
               }
               return node;
             })
           );
-          showToast(`Execution finished! Real SLM generated code & AST contracts across ${execData.results.length} worktrees.`);
+          if (firstNodeWithDiff) {
+            setSelectedNode(firstNodeWithDiff);
+            setSidebarTab("diff");
+          }
+          showToast(`Execution finished! Real model generated code & AST contracts across ${execData.results.length} worktrees.`);
         }
       }
     } catch (err) {
@@ -1720,8 +1738,9 @@ export default function App() {
                 <div>
                   {selectedNode?.diff ? (
                     <div className="border border-[#3d3733] bg-[#1a1816] rounded overflow-hidden">
-                      <div className="bg-[#22201e] px-2 py-1 text-[9px] font-mono text-[#8c8275] border-b border-[#262320]">
-                        Unified Worktree Diff: schema.prisma
+                      <div className="bg-[#22201e] px-2 py-1.5 text-[9px] font-mono text-[#8c8275] border-b border-[#262320] flex items-center justify-between">
+                        <span>Unified Worktree Diff: <strong className="text-[#d8d3cd]">{selectedNode?.filePath || selectedNode?.targetFile || selectedNode?.title}</strong></span>
+                        {selectedNode?.agentName && <span className="text-[#d97736]">{selectedNode.agentName}</span>}
                       </div>
                       <pre className="p-2 font-mono text-[9px] leading-relaxed overflow-x-auto text-[#d8d3cd]">
                         {selectedNode.diff.split("\n").map((line, idx) => (
