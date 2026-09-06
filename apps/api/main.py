@@ -30,11 +30,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global State
+# Global State & Scoped Workspace Resolution
 blackboard = Blackboard()
 lock_mgr = LockManager(default_ttl_seconds=3600)
 slm_client = LocalSLMClient(default_model="gemma3:latest")
-workspace_dir = os.environ.get("CAUSA_WORKSPACE_DIR", os.getcwd())
+
+workspace_env = os.environ.get("CAUSA_WORKSPACE_DIR")
+if workspace_env:
+    workspace_dir = os.path.abspath(workspace_env)
+else:
+    workspace_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "local-demo"))
+
+os.makedirs(workspace_dir, exist_ok=True)
+print(f"[Causa Control Plane] Scoped Workspace: {workspace_dir}")
+
 ferry = FerryProxy(workspace_root=workspace_dir, lock_manager=lock_mgr, blackboard=blackboard)
 planner = TaskPlanner(blackboard=blackboard, slm_client=slm_client)
 supervisor = SwarmSupervisor(repo_root=workspace_dir, ferry_proxy=ferry)
@@ -165,6 +174,15 @@ async def execute_swarm(req: ExecutePlanRequest):
         diff_body = "\n".join(f"+ {line}" for line in code_lines[:15])
         diff_text = f"--- a/{file_path}\n+++ b/{file_path}\n@@ -0,0 +1,{min(15, len(code_lines))} @@\n{diff_body}"
 
+        # Persist generated code to target file inside scoped workspace (e.g. local-demo)
+        full_dest = os.path.join(workspace_dir, file_path)
+        try:
+            os.makedirs(os.path.dirname(full_dest), exist_ok=True)
+            with open(full_dest, "w", encoding="utf-8") as f:
+                f.write(code)
+        except Exception as write_err:
+            print(f"[Causa] Error writing file {full_dest}: {write_err}")
+
         # Publish new AST contract to Blackboard
         contract_symbol = f"{node_title.lower().replace(' ', '.')}.contract"
         blackboard.publish(
@@ -182,6 +200,8 @@ async def execute_swarm(req: ExecutePlanRequest):
             "status": "COMPLETED",
             "generatedCode": code,
             "diff": diff_text,
+            "filePath": file_path,
+            "absolutePath": full_dest,
             "tokens": tokens if tokens > 0 else 4800,
         })
 
@@ -189,15 +209,30 @@ async def execute_swarm(req: ExecutePlanRequest):
         "success": True,
         "results": results,
         "total_tokens": total_tokens,
+        "workspace": workspace_dir,
     }
 
 
 # -------------------------------------------------------------
-# 3. Telemetry & Blackboard Feed
+# 3. Workspace Inspection Endpoint
+# -------------------------------------------------------------
+@app.get("/api/workspace")
+async def get_workspace():
+    return {
+        "workspace_dir": workspace_dir,
+        "exists": os.path.exists(workspace_dir),
+        "is_git_repo": os.path.exists(os.path.join(workspace_dir, ".git")),
+        "files": [f for f in os.listdir(workspace_dir) if not f.startswith(".")] if os.path.exists(workspace_dir) else [],
+    }
+
+
+# -------------------------------------------------------------
+# 4. Telemetry & Blackboard Feed
 # -------------------------------------------------------------
 @app.get("/api/telemetry")
 async def get_telemetry():
     return {
+        "workspace": workspace_dir,
         "contracts": blackboard.get_all_contracts(),
         "leases": lock_mgr.list_active_leases(),
         "metrics": supervisor.get_swarm_metrics(),
