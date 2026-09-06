@@ -34,9 +34,10 @@ app.add_middleware(
 blackboard = Blackboard()
 lock_mgr = LockManager(default_ttl_seconds=3600)
 slm_client = LocalSLMClient(default_model="gemma3:latest")
-ferry = FerryProxy(lock_manager=lock_mgr, blackboard=blackboard)
+workspace_dir = os.environ.get("CAUSA_WORKSPACE_DIR", os.getcwd())
+ferry = FerryProxy(workspace_root=workspace_dir, lock_manager=lock_mgr, blackboard=blackboard)
 planner = TaskPlanner(blackboard=blackboard, slm_client=slm_client)
-supervisor = SwarmSupervisor(ferry_proxy=ferry)
+supervisor = SwarmSupervisor(repo_root=workspace_dir, ferry_proxy=ferry)
 
 # Seed initial active contracts & leases on the shared Blackboard
 blackboard.publish(
