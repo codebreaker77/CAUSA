@@ -33,7 +33,7 @@ class LocalSLMClient:
         self,
         base_url: str = "http://localhost:11434",
         default_model: str = "gemma3:latest",
-        timeout_seconds: int = 45,
+        timeout_seconds: int = 120,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.default_model = default_model
@@ -70,6 +70,7 @@ class LocalSLMClient:
         system_prompt: Optional[str] = None,
         model: Optional[str] = None,
         temperature: float = 0.2,
+        max_tokens: int = 350,
     ) -> SLMGenerationResult:
         """Invokes the local SLM and extracts ground-truth token accounting."""
         target_model = model or self.default_model
@@ -81,6 +82,7 @@ class LocalSLMClient:
             "stream": False,
             "options": {
                 "temperature": temperature,
+                "num_predict": max_tokens,
             },
         }
         if system_prompt:

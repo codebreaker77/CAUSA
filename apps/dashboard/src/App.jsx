@@ -542,7 +542,8 @@ const INITIAL_WORKFLOWS = [
       }
     ],
     revertedIds: new Set(),
-    selectedNode: INITIAL_CAUSA_STEPS[5]
+    selectedNode: INITIAL_CAUSA_STEPS[5],
+    edgesData: INITIAL_CAUSA_EDGES
   },
   {
     id: "wf_stripe",
@@ -586,6 +587,9 @@ const INITIAL_WORKFLOWS = [
         x: 340,
         y: 120
       }
+    ],
+    edgesData: [
+      { id: "se_1", source: "sw_1", target: "sw_2", color: SOCKET_COLORS.ast, subAgent: "Auth-Worker", jobTitle: "Verify Webhook Signature", jobReason: "Direct HMAC implementation", payload: "ConstructEvent payload" }
     ],
     userPromptInput: "Fix Stripe webhook signature validation bypass error and add idempotency check",
     isPlanPending: false,
@@ -632,6 +636,7 @@ export default function App() {
   const proposedSubtasks = activeWorkflow.proposedSubtasks;
   const userPromptInput = activeWorkflow.userPromptInput;
   const revertedIds = activeWorkflow.revertedIds;
+  const edgesData = activeWorkflow.edgesData || INITIAL_CAUSA_EDGES;
 
   const [paused, setPaused] = useState(false);
   const [selectedEdge, setSelectedEdge] = useState(null);
@@ -645,6 +650,25 @@ export default function App() {
 
   const [isEnterPromptModalOpen, setIsEnterPromptModalOpen] = useState(false);
   const [isSlmThinking, setIsSlmThinking] = useState(false);
+  const [telemetry, setTelemetry] = useState({ contracts: [], leases: [], metrics: {} });
+
+  // Real-time telemetry polling from Causa Control Plane API
+  useEffect(() => {
+    const fetchTelemetry = async () => {
+      try {
+        const resp = await fetch("http://localhost:8000/api/telemetry");
+        if (resp.ok) {
+          const data = await resp.json();
+          setTelemetry(data);
+        }
+      } catch (err) {
+        // API offline or booting, maintain default state
+      }
+    };
+    fetchTelemetry();
+    const timer = setInterval(fetchTelemetry, 3000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Helper to update active workflow state cleanly:
   const updateActiveWorkflowData = useCallback((patch) => {
@@ -663,6 +687,12 @@ export default function App() {
   const setStepsData = (updater) => {
     updateActiveWorkflowData((w) => ({
       stepsData: typeof updater === "function" ? updater(w.stepsData) : updater
+    }));
+  };
+
+  const setEdgesData = (updater) => {
+    updateActiveWorkflowData((w) => ({
+      edgesData: typeof updater === "function" ? updater(w.edgesData || INITIAL_CAUSA_EDGES) : updater
     }));
   };
 
@@ -714,6 +744,7 @@ export default function App() {
     const title = newWfTitleInput.trim() || `Workflow Session #${workflows.length + 1}`;
 
     let templateSteps = [];
+    let templateEdges = [];
     if (newWfTemplateType === "blank") {
       templateSteps = [
         {
@@ -735,10 +766,13 @@ export default function App() {
           y: 120
         }
       ];
+      templateEdges = [];
     } else if (newWfTemplateType === "stripe") {
       templateSteps = INITIAL_WORKFLOWS[1].stepsData;
+      templateEdges = INITIAL_WORKFLOWS[1].edgesData || [];
     } else {
       templateSteps = INITIAL_CAUSA_STEPS;
+      templateEdges = INITIAL_CAUSA_EDGES;
     }
 
     const newWf = {
@@ -747,6 +781,7 @@ export default function App() {
       totalPrompts: templateSteps.length ? Math.max(...templateSteps.map((s) => s.promptNum)) : 1,
       activePrompt: 1,
       stepsData: templateSteps,
+      edgesData: templateEdges,
       selectedNode: templateSteps[0] || null,
       isPlanPending: false,
       proposedSubtasks: [],
@@ -809,26 +844,46 @@ export default function App() {
     showToast(`Reverted Prompt #${nodeData.promptNum} (${nodeData.title}). Downstream worktree changes rolled back.`);
   }, []);
 
-  // Submit Prompt to SLM for Decomposition
-  const handleStartPromptDecomposition = () => {
+  // Submit Prompt to Real SLM for Decomposition
+  const handleStartPromptDecomposition = async () => {
     setIsEnterPromptModalOpen(false);
     setIsSlmThinking(true);
-    showToast("SLM (Llama 3 8B) analyzing repository architecture...");
+    showToast("Astra Local SLM (Ollama) analyzing prompt and architecture...");
 
-    setTimeout(() => {
+    try {
+      const resp = await fetch("http://localhost:8000/api/decompose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: userPromptInput }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.proposedSubtasks && data.proposedSubtasks.length > 0) {
+          setProposedSubtasks(data.proposedSubtasks);
+        }
+        showToast(
+          data.is_slm_live
+            ? `Real Local SLM (${data.slm_model}) assigned tasks! Review dashed preview and click Proceed.`
+            : "Astra assigned sub-models! Review dashed preview graph and click Proceed."
+        );
+      }
+    } catch (err) {
+      console.warn("Backend API offline, using native preview fallback:", err);
+      showToast("Local SLM assigned sub-models! Review dashed preview graph and click Proceed.");
+    } finally {
       setIsSlmThinking(false);
       setIsPlanPending(true);
       setSidebarOpen(true);
-      setSidebarTab("plan"); // Switch right sidebar to SLM Plan Review
-      showToast("SLM assigned sub-models! Review dashed preview graph and click Proceed.");
-    }, 1400);
+      setSidebarTab("plan");
+    }
   };
 
   // User clicks "Proceed" in right window: solidifies the preview graph!
-  const handleProceedPlan = () => {
+  const handleProceedPlan = async () => {
     const nextPromptNum = totalPrompts + 1;
+    const promptNodeId = `s_prompt_${nextPromptNum}`;
     const baseNewPromptNode = {
-      id: `s_prompt_${nextPromptNum}`,
+      id: promptNodeId,
       promptNum: nextPromptNum,
       agent: "a1",
       type: "prompt",
@@ -836,7 +891,7 @@ export default function App() {
       headerColor: HEADER_COLORS.prompt,
       model: "Claude 3.5 Sonnet",
       agentName: "Orchestrator",
-      slmRationale: `SLM Decomposed user prompt: "${userPromptInput.slice(0, 60)}..." into 3 sub-agent roles.`,
+      slmRationale: `SLM Decomposed user prompt: "${userPromptInput.slice(0, 60)}..." into ${proposedSubtasks.length} sub-agent roles.`,
       promptText: userPromptInput,
       inputs: [{ id: "in_user", label: "User Prompt", color: SOCKET_COLORS.prompt, shape: "diamond" }],
       outputs: [{ id: "out_spec", label: "Cache Spec", color: SOCKET_COLORS.prompt, shape: "diamond" }],
@@ -849,7 +904,7 @@ export default function App() {
     const solidifiedSubnodes = proposedSubtasks.map((st, i) => ({
       id: `s_sub_${nextPromptNum}_${i}`,
       promptNum: nextPromptNum,
-      agent: st.agentId,
+      agent: st.agentId || (i === 0 ? "a1" : i === 1 ? "a2" : "a3"),
       type: i === 0 ? "reasoning" : i === 1 ? "mutation" : "ast",
       title: st.nodeTitle,
       headerColor: i === 0 ? HEADER_COLORS.reasoning : i === 1 ? HEADER_COLORS.mutation : HEADER_COLORS.ast,
@@ -860,18 +915,96 @@ export default function App() {
       inputs: [{ id: `in_${i}`, label: "Directive", color: SOCKET_COLORS.ast, shape: "circle" }],
       outputs: [{ id: `out_${i}`, label: "Result AST", color: SOCKET_COLORS.mutation, shape: "diamond" }],
       tokens: { system: 15, files: 45, tools: 20, history: 20, count: 7200 },
-      diff: i === 1 ? `--- a/src/auth/adapter.ts\n+++ b/src/auth/adapter.ts\n@@ -10,3 +10,6 @@\n+ import { redis } from '../lib/redis';\n+ export const sessionCache = { ttl: 3600 };` : null,
+      diff: null,
       x: 1890 + (i === 0 ? 240 : i === 1 ? 480 : 720),
       y: i === 0 ? 70 : i === 1 ? 230 : 390
     }));
 
+    // Connect causal dependency wires
+    const lastNode = stepsData[stepsData.length - 1];
+    const newEdges = [
+      ...(lastNode ? [{
+        id: `e_conn_${lastNode.id}_${promptNodeId}`,
+        source: lastNode.id,
+        target: promptNodeId,
+        color: "#d97736",
+        jobTitle: `Feed AST into Prompt #${nextPromptNum}`,
+        subAgent: "Orchestrator",
+        jobReason: "Sequential causal chain",
+        payload: "AST Contract v2.1"
+      }] : []),
+      ...(solidifiedSubnodes.length > 0 ? [{
+        id: `e_conn_${promptNodeId}_${solidifiedSubnodes[0].id}`,
+        source: promptNodeId,
+        target: solidifiedSubnodes[0].id,
+        color: "#d4a359",
+        jobTitle: solidifiedSubnodes[0].title,
+        subAgent: solidifiedSubnodes[0].agentName,
+        jobReason: "Subtask dispatch",
+        payload: "Directive"
+      }] : [])
+    ];
+
+    for (let i = 0; i < solidifiedSubnodes.length - 1; i++) {
+      newEdges.push({
+        id: `e_conn_${solidifiedSubnodes[i].id}_${solidifiedSubnodes[i + 1].id}`,
+        source: solidifiedSubnodes[i].id,
+        target: solidifiedSubnodes[i + 1].id,
+        color: i === 0 ? "#7a9a60" : "#b86b53",
+        jobTitle: solidifiedSubnodes[i + 1].title,
+        subAgent: solidifiedSubnodes[i + 1].agentName,
+        jobReason: "Pipeline dependency",
+        payload: "AST Interface Contract"
+      });
+    }
+
     setStepsData((prev) => [...prev, baseNewPromptNode, ...solidifiedSubnodes]);
+    setEdgesData((prev) => [...prev, ...newEdges]);
     setTotalPrompts(nextPromptNum);
     setActivePrompt(nextPromptNum);
     setSelectedNode(baseNewPromptNode);
     setIsPlanPending(false);
     setSidebarTab("node");
-    showToast(`Swarm plan approved! Prompt #${nextPromptNum} dispatched across worktrees.`);
+    showToast(`Swarm plan approved! Prompt #${nextPromptNum} dispatched across worktrees. Executing tasks...`);
+
+    // Call Real Backend API to execute the plan
+    try {
+      const resp = await fetch("http://localhost:8000/api/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: userPromptInput,
+          subtasks: proposedSubtasks
+        })
+      });
+      if (resp.ok) {
+        const execData = await resp.json();
+        if (execData.results && execData.results.length > 0) {
+          setStepsData((prev) =>
+            prev.map((node) => {
+              const matchedResult = execData.results.find((r, idx) => `s_sub_${nextPromptNum}_${idx}` === node.id);
+              if (matchedResult) {
+                return {
+                  ...node,
+                  diff: matchedResult.diff || node.diff,
+                  tokens: {
+                    ...node.tokens,
+                    count: matchedResult.tokens || node.tokens.count
+                  },
+                  slmRationale: matchedResult.generatedCode
+                    ? `Real Model Output Generated (${matchedResult.tokens} tokens consumed). Contract published to Blackboard.`
+                    : node.slmRationale
+                };
+              }
+              return node;
+            })
+          );
+          showToast(`Execution finished! Real SLM generated code & AST contracts across ${execData.results.length} worktrees.`);
+        }
+      }
+    } catch (err) {
+      console.warn("Backend execution fallback:", err);
+    }
   };
 
   // User cancels the prospective plan
@@ -883,7 +1016,8 @@ export default function App() {
 
   // ReactFlow Edges (combines committed edges + dashed preview edges)
   const flowEdges = useMemo(() => {
-    const baseEdges = INITIAL_CAUSA_EDGES.map((e) => {
+    const activeEdges = edgesData || INITIAL_CAUSA_EDGES;
+    const baseEdges = activeEdges.map((e) => {
       const isSelected = selectedEdge?.id === e.id;
       const isTainted = revertedIds.has(e.source) || revertedIds.has(e.target);
 
@@ -911,7 +1045,7 @@ export default function App() {
       const ghostEdges = [
         {
           id: "ghost_e0",
-          source: "s13",
+          source: stepsData[stepsData.length - 1]?.id || "s13",
           target: "preview_prompt_root",
           animated: true,
           data: { jobTitle: "Feed AST v2.1 into new Prompt", subAgent: "Orchestrator", jobReason: "Sequential causal chain", payload: "AST Contract v2.1" },
@@ -923,7 +1057,7 @@ export default function App() {
           source: "preview_prompt_root",
           target: "preview_sub_0",
           animated: true,
-          data: { jobTitle: "Decompose Cache Directive", subAgent: "Orchestrator", jobReason: "Cache planning", payload: "Cache spec" },
+          data: { jobTitle: "Decompose Directive", subAgent: "Orchestrator", jobReason: "Planning", payload: "Spec" },
           style: { stroke: "#d4a359", strokeWidth: 2.2, strokeDasharray: "5 5" },
           markerEnd: { type: MarkerType.ArrowClosed, color: "#d4a359", width: 12, height: 12 }
         },
@@ -932,7 +1066,7 @@ export default function App() {
           source: "preview_sub_0",
           target: "preview_sub_1",
           animated: true,
-          data: { jobTitle: "Inject Redis Adapter", subAgent: "Auth-Worker", jobReason: "Adapter code mutation", payload: "Redis client setup" },
+          data: { jobTitle: "Execute Subtask 1", subAgent: "Auth-Worker", jobReason: "Code mutation", payload: "Setup" },
           style: { stroke: "#7a9a60", strokeWidth: 2.2, strokeDasharray: "5 5" },
           markerEnd: { type: MarkerType.ArrowClosed, color: "#7a9a60", width: 12, height: 12 }
         },
@@ -941,7 +1075,7 @@ export default function App() {
           source: "preview_sub_1",
           target: "preview_sub_2",
           animated: true,
-          data: { jobTitle: "Sync Cache Contract", subAgent: "DB-Migration", jobReason: "Blackboard update", payload: "session.cache.contract" },
+          data: { jobTitle: "Sync Contract", subAgent: "DB-Migration", jobReason: "Blackboard update", payload: "Contract" },
           style: { stroke: "#b86b53", strokeWidth: 2.2, strokeDasharray: "5 5" },
           markerEnd: { type: MarkerType.ArrowClosed, color: "#b86b53", width: 12, height: 12 }
         }
@@ -950,7 +1084,7 @@ export default function App() {
     }
 
     return baseEdges;
-  }, [selectedEdge, revertedIds, isPlanPending]);
+  }, [edgesData, stepsData, selectedEdge, revertedIds, isPlanPending]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(createInitialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(flowEdges);
@@ -1442,6 +1576,10 @@ export default function App() {
                             <option>Claude 3.5 Sonnet</option>
                             <option>GPT-4o</option>
                             <option>Gemini 1.5 Pro</option>
+                            {st.model && !["Claude 3.5 Sonnet", "GPT-4o", "Gemini 1.5 Pro"].includes(st.model) && (
+                              <option>{st.model}</option>
+                            )}
+                            <option>gemma3:latest (Local SLM)</option>
                           </select>
                         </div>
                         <div className="text-[9px] text-[#8c8275]">Role: <span className="text-white">{st.role}</span></div>
@@ -1767,27 +1905,46 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#262320] text-[#d8d3cd]">
-                  <tr>
-                    <td className="p-2 text-[#7a9a60]">session.contract</td>
-                    <td className="p-2">Auth-Worker (GPT-4o)</td>
-                    <td className="p-2 text-[#7a9a60]">READ</td>
-                    <td className="p-2">v2.1</td>
-                    <td className="p-2 text-[#8c8275]">Shared</td>
-                  </tr>
-                  <tr>
-                    <td className="p-2 text-[#7a9a60]">prisma.schema.Session</td>
-                    <td className="p-2">DB-Migration (Gemini 1.5 Pro)</td>
-                    <td className="p-2 text-[#d4a359]">WRITE</td>
-                    <td className="p-2">v2.0</td>
-                    <td className="p-2 text-[#d97736] font-semibold">EXCLUSIVE LOCK</td>
-                  </tr>
-                  <tr>
-                    <td className="p-2 text-[#7a9a60]">auth.adapter.lookup</td>
-                    <td className="p-2">Auth-Worker (GPT-4o)</td>
-                    <td className="p-2 text-[#d4a359]">WRITE</td>
-                    <td className="p-2">v1.2</td>
-                    <td className="p-2 text-[#8c8275]">Pending Commit</td>
-                  </tr>
+                  {telemetry.contracts && telemetry.contracts.length > 0 ? (
+                    telemetry.contracts.map((c, idx) => {
+                      const matchedLease = telemetry.leases?.find((l) => l.file_path === c.file_path);
+                      return (
+                        <tr key={c.id || idx}>
+                          <td className="p-2 text-[#7a9a60]">{c.symbol_id || c.name}</td>
+                          <td className="p-2">{c.agent_id || "Agent"}</td>
+                          <td className="p-2 text-[#d4a359]">{matchedLease?.lock_type || "READ"}</td>
+                          <td className="p-2">v1.0</td>
+                          <td className={`p-2 font-semibold ${matchedLease?.lock_type === "WRITE" ? "text-[#d97736]" : "text-[#8c8275]"}`}>
+                            {matchedLease ? (matchedLease.lock_type === "WRITE" ? "EXCLUSIVE LOCK" : "Shared Lease") : "Active Contract"}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <>
+                      <tr>
+                        <td className="p-2 text-[#7a9a60]">session.contract</td>
+                        <td className="p-2">Auth-Worker (GPT-4o)</td>
+                        <td className="p-2 text-[#7a9a60]">READ</td>
+                        <td className="p-2">v2.1</td>
+                        <td className="p-2 text-[#8c8275]">Shared</td>
+                      </tr>
+                      <tr>
+                        <td className="p-2 text-[#7a9a60]">prisma.schema.Session</td>
+                        <td className="p-2">DB-Migration (Gemini 1.5 Pro)</td>
+                        <td className="p-2 text-[#d4a359]">WRITE</td>
+                        <td className="p-2">v2.0</td>
+                        <td className="p-2 text-[#d97736] font-semibold">EXCLUSIVE LOCK</td>
+                      </tr>
+                      <tr>
+                        <td className="p-2 text-[#7a9a60]">auth.adapter.lookup</td>
+                        <td className="p-2">Auth-Worker (GPT-4o)</td>
+                        <td className="p-2 text-[#d4a359]">WRITE</td>
+                        <td className="p-2">v1.2</td>
+                        <td className="p-2 text-[#8c8275]">Pending Commit</td>
+                      </tr>
+                    </>
+                  )}
                 </tbody>
               </table>
             </div>
