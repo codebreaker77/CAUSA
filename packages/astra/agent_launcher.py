@@ -138,22 +138,22 @@ class AgentLauncher:
 
         try:
             if agent_type == AgentCLIType.CODEX:
-                exe = discovered.get("codex") or "codex"
-                cmd_args = ["cmd.exe", "/c", exe, "exec", "--dangerously-bypass-approvals-and-sandbox", "-C", working_dir, prompt]
+                node_js = os.path.expanduser("~\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js")
+                cmd_args = ["node", node_js, "exec", "--dangerously-bypass-approvals-and-sandbox", "-C", working_dir, prompt] if os.path.exists(node_js) else ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "-C", working_dir, prompt]
                 proc = subprocess.run(cmd_args, capture_output=True, text=True, timeout=timeout, cwd=working_dir, stdin=subprocess.DEVNULL)
                 out = (proc.stdout + "\n" + proc.stderr).strip()
                 return proc.returncode == 0, out, 4500
 
             elif agent_type == AgentCLIType.OPENCODE:
-                exe = discovered.get("opencode") or "opencode"
-                cmd_args = ["cmd.exe", "/c", exe, "run", "--dir", working_dir, "--dangerously-skip-permissions", prompt]
+                node_js = os.path.expanduser("~\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode")
+                cmd_args = ["node", node_js, "run", "--dir", working_dir, "--dangerously-skip-permissions", prompt] if os.path.exists(node_js) else ["opencode", "run", "--dir", working_dir, "--dangerously-skip-permissions", prompt]
                 proc = subprocess.run(cmd_args, capture_output=True, text=True, timeout=timeout, cwd=working_dir, stdin=subprocess.DEVNULL)
                 out = (proc.stdout + "\n" + proc.stderr).strip()
                 return proc.returncode == 0, out, 3800
 
             elif agent_type == AgentCLIType.GEMINI_ANTIGRAVITY:
                 exe = discovered.get("gemini") or "gemini"
-                cmd_args = ["cmd.exe", "/c", exe, prompt]
+                cmd_args = ["node", exe, prompt]
                 proc = subprocess.run(cmd_args, capture_output=True, text=True, timeout=timeout, cwd=working_dir, stdin=subprocess.DEVNULL)
                 out = (proc.stdout + "\n" + proc.stderr).strip()
                 return proc.returncode == 0, out, 4000

@@ -72,6 +72,7 @@ class LocalSLMClient:
         model: Optional[str] = None,
         temperature: float = 0.2,
         max_tokens: int = 350,
+        timeout: Optional[int] = None,
     ) -> SLMGenerationResult:
         """Invokes the local SLM and extracts ground-truth token accounting."""
         target_model = model or self.default_model
@@ -95,7 +96,7 @@ class LocalSLMClient:
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
 
                 p_tokens = data.get("prompt_eval_count", 0) or 0
