@@ -1,4 +1,4 @@
-"""Fullerence Causal Substrate, Graph Engine, Debugger, Ingress, Daemon & MCP."""
+"""Fullerence Causal Substrate, Graph Engine, Debugger, Ingress, Daemon, CLI & MCP."""
 
 from packages.fullerence.types import (
     CausalNode,
@@ -15,6 +15,16 @@ from packages.fullerence.types import (
     PreCommitRuleType,
     InterceptionDecision,
     InterceptionEvaluation,
+    BreakpointManager,
+    SemanticBreakpoint,
+)
+from packages.fullerence.models import (
+    Base,
+    CausalNodeModel,
+    CausalEdgeModel,
+    ASTDiffModel,
+    LeaseModel,
+    BlackboardModel,
 )
 from packages.fullerence.storage import FullerenceStorage
 from packages.fullerence.graph import FullerenceGraph
@@ -25,8 +35,6 @@ from packages.fullerence.debugger import (
     get_transitive_taint_set,
     compute_counterfactual_fork_point,
     get_attribution_view,
-    BreakpointManager,
-    SemanticBreakpoint,
 )
 from packages.fullerence.daemon import (
     WorktreeWatcher,
@@ -34,7 +42,14 @@ from packages.fullerence.daemon import (
     MultiWorktreeDaemon,
     WorktreeDaemon,
 )
-from packages.fullerence.mcp import FullerenceMCPServer
+from packages.fullerence.mcp import FullerenceMCPServer, CausaMCPServer
+from packages.fullerence.cli import (
+    cmd_log,
+    cmd_blame,
+    cmd_rollback,
+    cmd_inspect,
+    main as cli_main,
+)
 
 __all__ = [
     # Types & Enums
@@ -52,6 +67,15 @@ __all__ = [
     "PreCommitRuleType",
     "InterceptionDecision",
     "InterceptionEvaluation",
+    "BreakpointManager",
+    "SemanticBreakpoint",
+    # Database Models
+    "Base",
+    "CausalNodeModel",
+    "CausalEdgeModel",
+    "ASTDiffModel",
+    "LeaseModel",
+    "BlackboardModel",
     # Substrate Core
     "FullerenceStorage",
     "FullerenceGraph",
@@ -62,8 +86,6 @@ __all__ = [
     "get_transitive_taint_set",
     "compute_counterfactual_fork_point",
     "get_attribution_view",
-    "BreakpointManager",
-    "SemanticBreakpoint",
     # Daemon & Watcher
     "WorktreeWatcher",
     "BlackboardSynchronizer",
@@ -71,4 +93,11 @@ __all__ = [
     "WorktreeDaemon",
     # Agent MCP
     "FullerenceMCPServer",
+    "CausaMCPServer",
+    # CLI
+    "cmd_log",
+    "cmd_blame",
+    "cmd_rollback",
+    "cmd_inspect",
+    "cli_main",
 ]

@@ -3,7 +3,7 @@
 from typing import Dict, List, Optional, Set, Any
 import networkx as nx
 
-from packages.core.schemas.nodes import (
+from packages.fullerence.types import (
     CausalNode,
     CausalEdge,
     CausalEdgeType,

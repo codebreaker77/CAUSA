@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from packages.core.schemas.nodes import (
+from packages.fullerence import (
     CausalNode,
     CausalNodeType,
     CausalEdge,
@@ -12,8 +12,8 @@ from packages.core.schemas.nodes import (
     Lease,
     LeaseLockState,
     BlackboardEntry,
+    FullerenceStorage,
 )
-from packages.fullerence.storage import FullerenceStorage
 
 TEST_DB_PATH = "tests/test_causa_layer1.db"
 

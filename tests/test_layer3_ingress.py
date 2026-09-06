@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from packages.core.schemas.nodes import (
+from packages.fullerence import (
     CausalNode,
     CausalNodeType,
     CausalEdge,
@@ -12,17 +12,16 @@ from packages.core.schemas.nodes import (
     Lease,
     LeaseLockState,
     BlackboardEntry,
-)
-from packages.core.schemas.ingress import (
     ToolCallIntent,
     PreCommitRule,
     PreCommitRuleType,
     InterceptionDecision,
+    FullerenceStorage,
+    FullerenceGraph,
+    IngressGateway,
+    BreakpointManager,
+    SemanticBreakpoint,
 )
-from packages.fullerence.storage import FullerenceStorage
-from packages.fullerence.graph import FullerenceGraph
-from packages.fullerence.ingress import IngressGateway
-from packages.debugger.breakpoints import BreakpointManager, SemanticBreakpoint
 
 TEST_DB = "tests/test_causa_layer3_ingress.db"
 

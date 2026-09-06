@@ -3,7 +3,7 @@
 import time
 import uuid
 from typing import Dict, Any, List, Optional
-from packages.core.schemas.nodes import (
+from packages.fullerence.types import (
     CausalNode,
     CausalNodeType,
     CausalEdge,
@@ -11,15 +11,14 @@ from packages.core.schemas.nodes import (
     ASTDiff,
     ASTDiffType,
     BlackboardEntry,
-)
-from packages.core.schemas.ingress import (
     ToolCallIntent,
     PreCommitRule,
     PreCommitRuleType,
     InterceptionDecision,
     InterceptionEvaluation,
+    BreakpointManager,
 )
-from packages.core.db.models import (
+from packages.fullerence.models import (
     CausalNodeModel,
     CausalEdgeModel,
     ASTDiffModel,
@@ -27,7 +26,6 @@ from packages.core.db.models import (
 )
 from packages.fullerence.storage import FullerenceStorage
 from packages.fullerence.graph import FullerenceGraph
-from packages.debugger.breakpoints import BreakpointManager
 
 
 class IngressGateway:

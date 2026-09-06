@@ -4,10 +4,12 @@ import os
 import shutil
 import time
 import pytest
-from packages.fullerence.storage import FullerenceStorage
-from packages.daemon.watcher import WorktreeWatcher
-from packages.daemon.sync import BlackboardSynchronizer
-from packages.daemon.service import MultiWorktreeDaemon
+from packages.fullerence import (
+    FullerenceStorage,
+    WorktreeWatcher,
+    BlackboardSynchronizer,
+    MultiWorktreeDaemon,
+)
 
 TEST_DB = "tests/test_causa_layer4_daemon.db"
 TEST_WORKTREES_DIR = "tests/test_worktrees_env"

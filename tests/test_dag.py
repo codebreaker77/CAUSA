@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from packages.core.schemas.nodes import (
+from packages.fullerence import (
     CausalNode,
     CausalNodeType,
     CausalEdge,
@@ -10,15 +10,15 @@ from packages.core.schemas.nodes import (
     ASTDiff,
     ASTDiffType,
     BlackboardEntry,
-)
-from packages.fullerence.storage import FullerenceStorage
-from packages.fullerence.graph import FullerenceGraph
-from packages.debugger.localization import localize_first_bad_decision
-from packages.debugger.invalidation import (
+    FullerenceStorage,
+    FullerenceGraph,
+    localize_first_bad_decision,
     get_transitive_taint_set,
     compute_counterfactual_fork_point,
+    get_attribution_view,
+    BreakpointManager,
+    SemanticBreakpoint,
 )
-from packages.debugger.attribution import get_attribution_view
 
 TEST_DB = "tests/test_causa_layer2_dag.db"
 
@@ -239,7 +239,6 @@ def test_layer2_debugger_exhaustive():
     # VALIDATION 5: Semantic Breakpoint Evaluator
     # -------------------------------------------------------------------------
     print("[VALIDATION 5] Running BreakpointManager semantic evaluations...")
-    from packages.debugger.breakpoints import BreakpointManager, SemanticBreakpoint
     bp_mgr = BreakpointManager()
     bp_mgr.add_breakpoint(
         SemanticBreakpoint(

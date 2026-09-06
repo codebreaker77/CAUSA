@@ -3,7 +3,7 @@
 import json
 import os
 import pytest
-from packages.core.schemas.nodes import (
+from packages.fullerence import (
     CausalNode,
     CausalNodeType,
     CausalEdge,
@@ -13,13 +13,13 @@ from packages.core.schemas.nodes import (
     Lease,
     LeaseLockState,
     BlackboardEntry,
+    FullerenceStorage,
+    cmd_log,
+    cmd_blame,
+    cmd_rollback,
+    cmd_inspect,
+    CausaMCPServer,
 )
-from packages.fullerence.storage import FullerenceStorage
-from packages.cli.commands.log import cmd_log
-from packages.cli.commands.blame import cmd_blame
-from packages.cli.commands.rollback import cmd_rollback
-from packages.cli.commands.inspect import cmd_inspect
-from packages.cli.mcp.server import CausaMCPServer
 
 TEST_DB = "tests/test_causa_layer5_cli.db"
 

@@ -5,7 +5,7 @@ from typing import List, Optional
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 
-from packages.core.db.models import (
+from packages.fullerence.models import (
     Base,
     CausalNodeModel,
     CausalEdgeModel,
@@ -13,7 +13,7 @@ from packages.core.db.models import (
     LeaseModel,
     BlackboardModel,
 )
-from packages.core.schemas.nodes import (
+from packages.fullerence.types import (
     CausalNode,
     CausalEdge,
     ASTDiff,
