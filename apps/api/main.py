@@ -205,8 +205,10 @@ def execute_swarm(req: ExecutePlanRequest):
         if not code:
             if ("local_slm" in assigned_model.lower() or "tester" in agent_name.lower() or "gemma" in assigned_model.lower()) and slm_client.is_available():
                 try:
-                    ok, code, tokens = planner.execute_slm_task(subtask)
-                    if ok and code.strip():
+                    ok, slm_code, slm_tokens = planner.execute_slm_task(subtask)
+                    if ok and slm_code.strip():
+                        code = slm_code
+                        tokens = slm_tokens
                         executed_by = "local_slm_gemma3"
                 except Exception:
                     code = ""

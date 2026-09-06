@@ -1296,8 +1296,6 @@ export default function App() {
         {/* Left: Blender Menus */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 font-medium">
-            <span className="text-[#7a9a60] font-bold">CORTEX</span>
-            <span className="text-[#665f57]">//</span>
             <span className="text-[#f5f0eb] font-semibold">Causa</span>
             <span className="text-[#8c8275] text-[9px]">v1.0</span>
           </div>
