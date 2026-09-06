@@ -4,6 +4,7 @@ from packages.astra.worktree import WorktreeManager, WorktreeMetadata
 from packages.astra.pty_runner import PTYRunner, AgentProcessTelemetry
 from packages.astra.planner import TaskPlanner, TaskPlan, SubTask, ModelTier
 from packages.astra.supervisor import SwarmSupervisor, SwarmAgentActor, SwarmAgentState
+from packages.astra.agent_launcher import AgentLauncher, AgentCLIType, AgentCLIConfig
 
 __all__ = [
     "WorktreeManager",
@@ -17,4 +18,7 @@ __all__ = [
     "SwarmSupervisor",
     "SwarmAgentActor",
     "SwarmAgentState",
+    "AgentLauncher",
+    "AgentCLIType",
+    "AgentCLIConfig",
 ]

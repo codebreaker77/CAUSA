@@ -43,14 +43,16 @@ class AgentProcessTelemetry(BaseModel):
 class PTYRunner:
     """Spawns and monitors agent CLI subprocesses with telemetry scraping."""
 
-    # Regex patterns for scraping agent status bars and tokens across popular CLIs
+    # Regex patterns for scraping agent status bars and tokens across popular CLIs (Codex, OpenCode, Gemini, Aider)
     TOKEN_REGEX = re.compile(
-        r"(?:Tokens?|Context):\s*([\d\.]+[kM]?)\s*/\s*([\d\.]+[kM]?)",
+        r"(?:Tokens?|Context):\s*([\d\.]+[kM]?)\s*/\s*([\d\.]+[kM]?)|"
+        r"(?:Input|Prompt):\s*([\d\.]+[kM]?)|"
+        r"(?:Total Tokens?):\s*([\d\.]+[kM]?)",
         re.IGNORECASE,
     )
-    COST_REGEX = re.compile(r"Cost:\s*\$([\d\.]+)", re.IGNORECASE)
+    COST_REGEX = re.compile(r"(?:Cost|Total Cost):\s*\$([\d\.]+)", re.IGNORECASE)
     MODEL_REGEX = re.compile(
-        r"(?:Model|Engine):\s*([\w\.\-\:]+)",
+        r"(?:Model|Engine):\s*([\w\.\-\:\/]+)",
         re.IGNORECASE,
     )
 
@@ -154,9 +156,14 @@ class PTYRunner:
         # 1. Scrape Tokens (e.g. Tokens: 12.5k / 200k)
         token_match = self.TOKEN_REGEX.search(line)
         if token_match:
-            used_str, limit_str = token_match.group(1), token_match.group(2)
-            self.telemetry.tokens_used = self._parse_k_number(used_str)
-            self.telemetry.tokens_limit = self._parse_k_number(limit_str)
+            if token_match.group(1):
+                self.telemetry.tokens_used = self._parse_k_number(token_match.group(1))
+                if token_match.group(2):
+                    self.telemetry.tokens_limit = self._parse_k_number(token_match.group(2))
+            elif token_match.group(3):
+                self.telemetry.tokens_used = self._parse_k_number(token_match.group(3))
+            elif token_match.group(4):
+                self.telemetry.tokens_used = self._parse_k_number(token_match.group(4))
 
         # 2. Scrape Cost (e.g. Cost: $0.04)
         cost_match = self.COST_REGEX.search(line)

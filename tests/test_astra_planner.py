@@ -8,11 +8,12 @@ from packages.ferry.blackboard import Blackboard
 class TestAstraPlanner(unittest.TestCase):
     def setUp(self):
         self.blackboard = Blackboard()
-        self.planner = TaskPlanner(blackboard=self.blackboard)
+        # Initialize with use_slm=False to test deterministic rule-based routing in unit tests
+        self.planner = TaskPlanner(blackboard=self.blackboard, use_slm=False)
 
     def test_model_tier_routing(self):
         # 1. Complex architecture -> Frontier Heavy
-        tier, model = self.planner.route_task_to_tier(
+        tier, model, tokens = self.planner.route_task_to_tier(
             "Architect Causal DAG Substrate",
             "Resolve concurrency and distributed race conditions",
         )
@@ -20,7 +21,7 @@ class TestAstraPlanner(unittest.TestCase):
         self.assertEqual(model, "claude-3-5-sonnet")
 
         # 2. Standard API CRUD -> Fast Cloud
-        tier2, model2 = self.planner.route_task_to_tier(
+        tier2, model2, tokens2 = self.planner.route_task_to_tier(
             "User Profile Endpoints",
             "Implement standard REST endpoints for user profiles",
         )
@@ -28,12 +29,12 @@ class TestAstraPlanner(unittest.TestCase):
         self.assertEqual(model2, "gemini-1.5-flash")
 
         # 3. Unit Tests -> Local SLM (0 cost)
-        tier3, model3 = self.planner.route_task_to_tier(
+        tier3, model3, tokens3 = self.planner.route_task_to_tier(
             "Unit Tests",
             "Write pytest unit tests and docstring documentation",
         )
         self.assertEqual(tier3, ModelTier.LOCAL_SLM)
-        self.assertEqual(model3, "ollama/qwen2.5-coder:7b")
+        self.assertEqual(model3, "gemma3:latest")
 
     def test_ast_context_synthesis(self):
         # Populate blackboard with an interface

@@ -61,10 +61,14 @@ class TaskPlanner:
     def __init__(
         self,
         blackboard: Optional[Blackboard] = None,
-        slm_client: Optional[LocalSLMClient] = None,
+        slm_client: Optional[Any] = None,
+        use_slm: bool = True,
     ) -> None:
         self.blackboard = blackboard or Blackboard()
-        self.slm = slm_client or LocalSLMClient()
+        if not use_slm:
+            self.slm = None
+        else:
+            self.slm = slm_client if slm_client is not None else LocalSLMClient()
 
     # -------------------------------------------------------------
     # 1. Model Tier Routing Logic (Real SLM with fallback)
