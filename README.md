@@ -27,7 +27,7 @@ Causa acts as a local control plane, transparent transport interceptor, and dist
 
 ## System Architecture
 
-`mermaid
+```mermaid
 flowchart TD
     Prompt[Developer Goal or Prompt] --> Astra
 
@@ -44,13 +44,13 @@ flowchart TD
     end
 
     Debugger ==>|WebSocket Real-Time Telemetry| UI[Causa Visual Debugger UI]
-`
+```
 
 ---
 
 ## Multi-Agent Interception and Concurrency Flow
 
-`mermaid
+```mermaid
 sequenceDiagram
     autonumber
     actor Agent as Subagent (CLI or MCP)
@@ -68,7 +68,7 @@ sequenceDiagram
     Ferry-->>Agent: 6. Acknowledge tool success
     Fullerence->>Debugger: 7. Validate invariant & breakpoint rules
     Note over Debugger: If test fails: trigger Transitive Causal Invalidation & rewind
-`
+```
 
 ---
 
@@ -141,7 +141,7 @@ A reactive Next.js 14 web application providing deep observability into swarm be
 
 ## Monorepo Directory Structure
 
-`	ext
+```text
 causa/
 +-- packages/
 |   +-- core/                  # Shared types, SQLite schemas, event definitions
@@ -177,7 +177,7 @@ causa/
 +-- tests/                     # Unit and integration test suites
 +-- .gitignore
 +-- README.md
-`
+```
 
 ---
 
@@ -187,36 +187,36 @@ causa/
 - Python 3.11+
 - Node.js 18+ and pnpm
 - Git 2.30+
-- Ollama (optional, for local SLM routing): ollama pull qwen2.5-coder:7b
+- Ollama (optional, for local SLM routing): `ollama pull qwen2.5-coder:7b`
 
 ### 1. Clone the Repository
-`ash
+```bash
 git clone https://github.com/codebreaker77/CAUSA.git
 cd CAUSA
-`
+```
 
 ### 2. Backend Setup
-`ash
+```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\\Scripts\\activate
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install fastapi uvicorn sqlalchemy networkx pexpect gitpython aiohttp websockets
-`
+```
 
 ### 3. Frontend Setup
-`ash
+```bash
 cd apps/ui
 pnpm install
-`
+```
 
 ### 4. Run Causa Locally
-`ash
+```bash
 # Terminal 1: Start Causa Control Plane API
 uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Terminal 2: Start Causa Visual Debugger UI
 cd apps/ui
 pnpm dev
-`
+```
 Open **http://localhost:3000** in your browser.
 
 ---
