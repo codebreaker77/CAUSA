@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from packages.ferry.blackboard import Blackboard, BlackboardEntry
 from packages.slm.client import LocalSLMClient
+from packages.gemini.client import GeminiClient, GeminiTier, GeminiGenerationResult
 
 
 class ModelTier(str, Enum):
@@ -54,9 +55,9 @@ class TaskPlanner:
     """Decomposes goals, routes to optimal model tiers via real SLM, and synthesizes AST context."""
 
     MODEL_MAPPINGS = {
-        ModelTier.FRONTIER_HEAVY: "Codex (CLI)",
-        ModelTier.FAST_CLOUD: "OpenCode (CLI)",
-        ModelTier.LOCAL_SLM: "gemma3:latest",
+        ModelTier.FRONTIER_HEAVY: "gemini-3.8-flash",   # reasoning model
+        ModelTier.FAST_CLOUD:     "gemini-3.5-flash-lite",
+        ModelTier.LOCAL_SLM:      "gemini-3.1-flash-lite",  # cheapest/fastest
     }
 
     def __init__(
@@ -64,8 +65,10 @@ class TaskPlanner:
         blackboard: Optional[Blackboard] = None,
         slm_client: Optional[LocalSLMClient] = None,
         use_slm: bool = True,
+        gemini_client: Optional[GeminiClient] = None,
     ) -> None:
         self.blackboard = blackboard or Blackboard()
+        self.gemini = gemini_client
         if not use_slm:
             self.slm = None
         else:
@@ -77,11 +80,38 @@ class TaskPlanner:
     def route_task_to_tier(self, task_title: str, task_desc: str) -> Tuple[ModelTier, str, int]:
         """Classifies task complexity and assigns the optimal model tier.
         
-        Uses the REAL local SLM (Ollama) if running, otherwise falls back to rule matching.
+        Uses Gemini NANO tier if gemini_client is set, otherwise Ollama SLM, otherwise rule matching.
         Returns:
             (tier: ModelTier, model_name: str, routing_tokens_used: int)
         """
-        # Try real Local SLM first
+        # Try Gemini NANO for fast, cheap classification
+        if self.gemini is not None:
+            prompt = (
+                f"Classify this coding task into exactly one tier: frontier_heavy, fast_cloud, or local_slm.\n"
+                f"Title: {task_title}\nDescription: {task_desc}\n"
+                f"Rules:\n"
+                f"- frontier_heavy: architecture, algorithms, concurrency, security, distributed systems\n"
+                f"- fast_cloud: standard features, API routes, database models, React components\n"
+                f"- local_slm: unit tests, documentation, stubs, type annotations, formatting\n"
+                f"Reply with ONLY one of: frontier_heavy, fast_cloud, local_slm"
+            )
+            result = self.gemini.generate_for_tier(
+                tier=GeminiTier.NANO,
+                prompt=prompt,
+                max_tokens=20,
+                temperature=0.0,
+            )
+            if result.success:
+                tier_str = result.response_text.strip().lower()
+                tokens = result.total_tokens
+                if "local_slm" in tier_str:
+                    return ModelTier.LOCAL_SLM, self.MODEL_MAPPINGS[ModelTier.LOCAL_SLM], tokens
+                elif "frontier_heavy" in tier_str:
+                    return ModelTier.FRONTIER_HEAVY, self.MODEL_MAPPINGS[ModelTier.FRONTIER_HEAVY], tokens
+                else:
+                    return ModelTier.FAST_CLOUD, self.MODEL_MAPPINGS[ModelTier.FAST_CLOUD], tokens
+
+        # Try real Local SLM (Ollama) next
         if self.slm and self.slm.is_available():
             tier_str, model_name, tokens = self.slm.route_task(task_title, task_desc)
             if tier_str == "local_slm":

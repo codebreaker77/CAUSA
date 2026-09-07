@@ -22,6 +22,17 @@ from packages.astra.agent_launcher import AgentLauncher, AgentCLIType
 from packages.ferry.proxy import FerryProxy
 from packages.ferry.lock_manager import LockManager
 from packages.ferry.blackboard import Blackboard
+from dotenv import load_dotenv
+
+load_dotenv()  # Loads .env file
+
+try:
+    from packages.gemini.client import GeminiClient, GeminiTier
+    gemini_client = GeminiClient()
+    print(f"[Causa] Gemini API ready")
+except Exception as e:
+    gemini_client = None
+    print(f"[Causa] Gemini API unavailable: {e}")
 
 app = FastAPI(title="Causa Control Plane API", version="1.0.0")
 
@@ -48,7 +59,7 @@ os.makedirs(workspace_dir, exist_ok=True)
 print(f"[Causa Control Plane] Scoped Workspace: {workspace_dir}")
 
 ferry = FerryProxy(workspace_root=workspace_dir, lock_manager=lock_mgr, blackboard=blackboard)
-planner = TaskPlanner(blackboard=blackboard, slm_client=slm_client)
+planner = TaskPlanner(blackboard=blackboard, slm_client=slm_client, gemini_client=gemini_client)
 supervisor = SwarmSupervisor(repo_root=workspace_dir, ferry_proxy=ferry)
 
 # Seed initial active contracts & leases on the shared Blackboard
@@ -94,44 +105,73 @@ class ExecutePlanRequest(BaseModel):
 # -------------------------------------------------------------
 @app.post("/api/decompose")
 def decompose_prompt(req: DecomposeRequest):
-    """Uses real local SLM to decompose prompt and assign model tiers."""
+    """Uses Gemini API or real local SLM to decompose prompt and assign model tiers."""
     prompt_text = req.prompt.strip()
-    
+
     # Check if local SLM is available
     is_slm_live = slm_client.is_available()
 
-    # Generate plan
+    # If Gemini available, use it for real AI-powered decomposition
+    zen_plan = None
+    if gemini_client:
+        zen_plan = gemini_client.decompose_goal(prompt_text)
+
+    # Generate plan via Astra planner (for tier routing & AST context)
     plan = planner.create_plan(prompt_text)
 
-    # Format proposed subtasks for dashboard UI with real heterogeneous agents
+    # Format proposed subtasks for dashboard UI with real heterogeneous Gemini agents
     proposed = []
     agent_mapping = {
-        ModelTier.FRONTIER_HEAVY: ("a1", "Codex-Architect"),
-        ModelTier.FAST_CLOUD: ("a2", "OpenCode-Worker"),
-        ModelTier.LOCAL_SLM: ("a3", "Local-SLM-Tester"),
+        ModelTier.FRONTIER_HEAVY: ("a1", "Gemini-Architect"),
+        ModelTier.FAST_CLOUD:     ("a2", "Gemini-Worker"),
+        ModelTier.LOCAL_SLM:      ("a3", "Gemini-Nano"),
     }
 
-    for idx, st in enumerate(plan.subtasks):
-        agent_id, agent_name = agent_mapping.get(st.assigned_tier, ("a1", "Codex-Architect"))
-        proposed.append({
-            "id": f"sub_{idx + 1}",
-            "agentId": agent_id,
-            "agentName": agent_name,
-            "model": st.assigned_model,
-            "role": f"{st.assigned_tier.value.upper()} Execution",
-            "prompt": st.description,
-            "nodeTitle": st.title,
-            "targetFiles": st.target_files,
-            "synthesizedContext": st.synthesized_context,
-        })
+    # If Gemini returned subtasks, merge them into the plan format
+    if zen_plan and zen_plan.get("subtasks"):
+        for idx, st in enumerate(zen_plan["subtasks"]):
+            tier_str = st.get("tier", "fast")
+            if tier_str in ("orchestrator", "worker"):
+                tier_key = ModelTier.FRONTIER_HEAVY
+            elif tier_str == "nano":
+                tier_key = ModelTier.LOCAL_SLM
+            else:
+                tier_key = ModelTier.FAST_CLOUD
+            agent_id, agent_name = agent_mapping[tier_key]
+            proposed.append({
+                "id": f"sub_{idx + 1}",
+                "agentId": agent_id,
+                "agentName": agent_name,
+                "model": zen_plan.get("orchestrator_model", "gemini-3.5-flash-lite"),
+                "role": f"{tier_str.upper()} Execution",
+                "prompt": st.get("description", ""),
+                "nodeTitle": st.get("title", f"Task {idx+1}"),
+                "targetFiles": [st.get("target_file", f"src/module_{idx+1}.py")],
+                "synthesizedContext": "",
+            })
+    else:
+        for idx, st in enumerate(plan.subtasks):
+            agent_id, agent_name = agent_mapping.get(st.assigned_tier, ("a1", "Gemini-Architect"))
+            proposed.append({
+                "id": f"sub_{idx + 1}",
+                "agentId": agent_id,
+                "agentName": agent_name,
+                "model": st.assigned_model,
+                "role": f"{st.assigned_tier.value.upper()} Execution",
+                "prompt": st.description,
+                "nodeTitle": st.title,
+                "targetFiles": st.target_files,
+                "synthesizedContext": st.synthesized_context,
+            })
 
     return {
         "success": True,
         "goal": prompt_text,
         "is_slm_live": is_slm_live,
+        "gemini_live": gemini_client is not None,
         "slm_model": slm_client.default_model if is_slm_live else "heuristic_fallback",
-        "routed_by": plan.routed_by,
-        "routing_tokens": plan.routing_tokens,
+        "routed_by": "gemini_orchestrator" if (gemini_client and zen_plan and zen_plan.get("subtasks")) else plan.routed_by,
+        "routing_tokens": zen_plan.get("orchestrator_tokens", 0) if zen_plan else plan.routing_tokens,
         "proposedSubtasks": proposed,
     }
 
@@ -176,184 +216,34 @@ def execute_swarm(req: ExecutePlanRequest):
 
         code = ""
         tokens = 0
-        executed_by = "local_slm"
+        executed_by = "gemini_api"
 
-        # 1. Quick probe of external CLI Agent if assigned (Codex or OpenCode)
-        if "codex" in assigned_model.lower() or "codex" in agent_name.lower():
-            ok, log_out, c_toks = AgentLauncher.execute_agent(AgentCLIType.CODEX, prompt_text, target_dir, timeout=1)
-            if ok and os.path.exists(full_dest):
-                try:
-                    with open(full_dest, "r", encoding="utf-8") as f:
-                        code = f.read()
-                    tokens = c_toks
-                    executed_by = "codex_cli"
-                except Exception:
-                    pass
+        if gemini_client:
+            # Map the assigned_model to a tier
+            if any(x in assigned_model.lower() for x in ["orchestrator", "opus", "3.8", "frontier"]):
+                gen_tier = GeminiTier.WORKER
+            elif any(x in assigned_model.lower() for x in ["haiku", "3.5", "fast", "worker"]):
+                gen_tier = GeminiTier.FAST
+            else:
+                gen_tier = GeminiTier.NANO
 
-        elif "opencode" in assigned_model.lower() or "opencode" in agent_name.lower():
-            ok, log_out, c_toks = AgentLauncher.execute_agent(AgentCLIType.OPENCODE, prompt_text, target_dir, timeout=1)
-            if ok and os.path.exists(full_dest):
-                try:
-                    with open(full_dest, "r", encoding="utf-8") as f:
-                        code = f.read()
-                    tokens = c_toks
-                    executed_by = "opencode_cli"
-                except Exception:
-                    pass
-
-        # 2. If code not generated, execute via Local SLM for tester tasks, or fast synthesis
-        if not code:
-            if ("local_slm" in assigned_model.lower() or "tester" in agent_name.lower() or "gemma" in assigned_model.lower()) and slm_client.is_available():
-                try:
-                    ok, slm_code, slm_tokens = planner.execute_slm_task(subtask)
-                    if ok and slm_code.strip():
-                        code = slm_code
-                        tokens = slm_tokens
-                        executed_by = "local_slm_gemma3"
-                except Exception:
-                    code = ""
-
-            # Intelligent semantic code generation tailored to target file & prompt
-            if not code or not code.strip():
-                clean_name = re.sub(r"[^a-zA-Z0-9_]", "", node_title.replace(" ", "_"))
-                if file_path.endswith(".py"):
-                    if "test" in file_path.lower():
-                        code = (
-                            f'"""Automated Unit Tests for {node_title}"""\n'
-                            f'import pytest\n\n\n'
-                            f'class Test{clean_name}:\n'
-                            f'    def test_initialization(self):\n'
-                            f'        assert True\n\n'
-                            f'    def test_execution(self):\n'
-                            f'        assert 1 + 1 == 2\n\n'
-                            f'    def test_contract_validity(self):\n'
-                            f'        # Contract assertion for {file_path}\n'
-                            f'        assert True\n'
-                        )
-                    else:
-                        code = (
-                            f'"""Implementation of {node_title}\n'
-                            f'Objective: {prompt_text}\n'
-                            f'"""\n\n'
-                            f'class {clean_name}:\n'
-                            f'    """Core implementation component."""\n'
-                            f'    def __init__(self, name: str = "{clean_name}"):\n'
-                            f'        self.name = name\n'
-                            f'        self.active = True\n\n'
-                            f'    def process(self, *args, **kwargs):\n'
-                            f'        return {{"status": "ok", "component": self.name}}\n'
-                        )
-                else:
-                    if "test" in file_path.lower():
-                        code = (
-                            f'/**\n'
-                            f' * Automated Test Suite for {node_title}\n'
-                            f' */\n\n'
-                            f'import {{ {clean_name} }} from "../src/{file_path.replace("tests/test_", "").replace("tests/", "").replace(".ts", "")}";\n\n'
-                            f'describe("{clean_name}", () => {{\n'
-                            f'  it("initializes with valid state", () => {{\n'
-                            f'    const instance = new {clean_name}();\n'
-                            f'    expect(instance.getState()).toBeDefined();\n'
-                            f'  }});\n\n'
-                            f'  it("executes core action without throwing", () => {{\n'
-                            f'    const instance = new {clean_name}();\n'
-                            f'    const result = instance.execute();\n'
-                            f'    expect(result).toBe(true);\n'
-                            f'  }});\n'
-                            f'}});\n'
-                        )
-                    elif "snake" in file_path.lower() or "game" in file_path.lower() or "snake" in prompt_text.lower():
-                        code = (
-                            f'/**\n'
-                            f' * Complete {node_title} Engine\n'
-                            f' * Objective: {prompt_text}\n'
-                            f' */\n\n'
-                            f'export interface Point {{ x: number; y: number; }}\n'
-                            f'export type Direction = "UP" | "DOWN" | "LEFT" | "RIGHT";\n\n'
-                            f'export class {clean_name} {{\n'
-                            f'  private snake: Point[] = [{{ x: 10, y: 10 }}, {{ x: 9, y: 10 }}, {{ x: 8, y: 10 }}];\n'
-                            f'  private food: Point = {{ x: 15, y: 10 }};\n'
-                            f'  private dir: Direction = "RIGHT";\n'
-                            f'  private score: number = 0;\n'
-                            f'  private isOver: boolean = false;\n'
-                            f'  private gridSize: number = 20;\n\n'
-                            f'  constructor(gridSize: number = 20) {{\n'
-                            f'    this.gridSize = gridSize;\n'
-                            f'  }}\n\n'
-                            f'  public getState() {{\n'
-                            f'    return {{\n'
-                            f'      snake: [...this.snake],\n'
-                            f'      food: {{ ...this.food }},\n'
-                            f'      direction: this.dir,\n'
-                            f'      score: this.score,\n'
-                            f'      isOver: this.isOver\n'
-                            f'    }};\n'
-                            f'  }}\n\n'
-                            f'  public setDirection(newDir: Direction): void {{\n'
-                            f'    this.dir = newDir;\n'
-                            f'  }}\n\n'
-                            f'  public tick(): boolean {{\n'
-                            f'    if (this.isOver) return false;\n'
-                            f'    const head = {{ ...this.snake[0] }};\n'
-                            f'    if (this.dir === "UP") head.y--;\n'
-                            f'    if (this.dir === "DOWN") head.y++;\n'
-                            f'    if (this.dir === "LEFT") head.x--;\n'
-                            f'    if (this.dir === "RIGHT") head.x++;\n'
-                            f'    if (head.x < 0 || head.x >= this.gridSize || head.y < 0 || head.y >= this.gridSize) {{\n'
-                            f'      this.isOver = true;\n'
-                            f'      return false;\n'
-                            f'    }}\n'
-                            f'    this.snake.unshift(head);\n'
-                            f'    if (head.x === this.food.x && head.y === this.food.y) {{\n'
-                            f'      this.score += 10;\n'
-                            f'      this.food = {{\n'
-                            f'        x: Math.floor(Math.random() * this.gridSize),\n'
-                            f'        y: Math.floor(Math.random() * this.gridSize)\n'
-                            f'      }};\n'
-                            f'    }} else {{\n'
-                            f'      this.snake.pop();\n'
-                            f'    }}\n'
-                            f'    return true;\n'
-                            f'  }}\n\n'
-                            f'  public execute(): boolean {{\n'
-                            f'    return this.tick();\n'
-                            f'  }}\n'
-                            f'}}\n'
-                        )
-                    else:
-                        code = (
-                            f'/**\n'
-                            f' * {node_title}\n'
-                            f' * Objective: {prompt_text}\n'
-                            f' */\n\n'
-                            f'export interface {clean_name}Config {{\n'
-                            f'  name: string;\n'
-                            f'  enabled: boolean;\n'
-                            f'  timeoutMs: number;\n'
-                            f'}}\n\n'
-                            f'export class {clean_name} {{\n'
-                            f'  private config: {clean_name}Config;\n'
-                            f'  private state: Map<string, any> = new Map();\n\n'
-                            f'  constructor(config?: Partial<{clean_name}Config>) {{\n'
-                            f'    this.config = {{\n'
-                            f'      name: "{clean_name}",\n'
-                            f'      enabled: true,\n'
-                            f'      timeoutMs: 5000,\n'
-                            f'      ...config\n'
-                            f'    }};\n'
-                            f'  }}\n\n'
-                            f'  public getState() {{\n'
-                            f'    return Object.fromEntries(this.state);\n'
-                            f'  }}\n\n'
-                            f'  public execute(payload: any = {{}}): boolean {{\n'
-                            f'    this.state.set("lastExecuted", Date.now());\n'
-                            f'    this.state.set("payload", payload);\n'
-                            f'    return true;\n'
-                            f'  }}\n'
-                            f'}}\n'
-                        )
-                tokens = 3200
-                executed_by = f"astra_{agent_name.lower().replace('-', '_')}"
+            result = gemini_client.generate_code(
+                task_description=prompt_text,
+                file_path=file_path,
+                tier=gen_tier,
+                context=st_dict.get("synthesizedContext", ""),
+            )
+            if result.success and result.response_text.strip():
+                code = result.response_text
+                tokens = result.total_tokens
+                executed_by = f"gemini/{result.model}"
+            else:
+                # Gemini failed — use a minimal functional stub as absolute last resort
+                code = f'# Gemini generation failed: {result.error}\n# Task: {node_title}\n'
+                executed_by = "stub_fallback"
+        else:
+            code = f'# Gemini client not configured. Set GEMINI_API_KEY in .env\n# Task: {node_title}\n'
+            executed_by = "no_client"
 
         # 3. Persist file to target directory
         try:
@@ -434,6 +324,20 @@ async def get_telemetry():
         "leases": lock_mgr.list_active_leases(),
         "metrics": supervisor.get_swarm_metrics(),
     }
+
+
+
+# -------------------------------------------------------------
+# 5. Providers Status Endpoint
+# -------------------------------------------------------------
+@app.get("/api/providers")
+def get_providers():
+    """Returns status of configured model providers."""
+    gemini_status = {"configured": gemini_client is not None}
+    if gemini_client:
+        probes = gemini_client.probe()
+        gemini_status["tiers"] = {k: {"ok": v[0], "message": v[1]} for k, v in probes.items()}
+    return {"gemini": gemini_status}
 
 
 if __name__ == "__main__":
