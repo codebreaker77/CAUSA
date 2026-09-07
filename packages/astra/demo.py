@@ -124,23 +124,32 @@ print('Completed!')
 """,
     }
 
-    for actor in actors:
-        # Create directories in worktree if needed
-        os.makedirs(os.path.join(actor.worktree.worktree_path, "packages", "core"), exist_ok=True)
-        os.makedirs(os.path.join(actor.worktree.worktree_path, "apps", "api"), exist_ok=True)
-        os.makedirs(os.path.join(actor.worktree.worktree_path, "tests"), exist_ok=True)
+    def execute_demo_task(task: SubTask):
+        actor = next(a for a in actors if a.task.id == task.id)
+        target_file = actor.task.target_files[0] if actor.task.target_files else "src/main.py"
+        target_full = os.path.join(actor.worktree.worktree_path, target_file)
+        os.makedirs(os.path.dirname(target_full), exist_ok=True)
+
+        default_script = f"""import time
+with open('{target_file}', 'w') as f:
+    f.write('// {actor.task.title}\\nexport const ready = true;\\n')
+print('Model: {actor.task.assigned_model}')
+print('Reasoning: Executing {actor.task.title}...')
+time.sleep(0.2)
+print('Tokens: 18.5k / 50k | Cost: $0.05')
+print('Completed!')
+"""
+        script_body = scripts.get(actor.agent_id, default_script)
 
         script_name = f"{actor.agent_id}_run.py"
         runner_script = os.path.join(actor.worktree.worktree_path, script_name)
         with open(runner_script, "w") as f:
-            f.write(scripts[actor.agent_id])
+            f.write(script_body)
 
         supervisor.launch_agent_process(actor.agent_id, f"{sys.executable} {script_name}")
-
-    # Wait for all agents to finish execution
-    for actor in actors:
         runner = supervisor._runners[actor.agent_id]
         runner.wait(timeout_seconds=5)
+
         # Remove runner script before merge so only target code is committed
         script_file = os.path.join(actor.worktree.worktree_path, f"{actor.agent_id}_run.py")
         if os.path.exists(script_file):
@@ -148,7 +157,10 @@ print('Completed!')
 
         print(f"  [Agent Done] {YELLOW}{actor.agent_id}{RESET} ({actor.task.assigned_model})")
         print(f"     -> Scraped Burn: {GREEN}{runner.telemetry.tokens_used:,} tokens{RESET} (${runner.telemetry.cost_usd})")
+        return actor
 
+    # Execute all agents respecting the task DAG dependency graph
+    supervisor.run_plan(plan, execute_demo_task)
     time.sleep(0.5)
 
     # Step 5: Automated Verification Gate & Atomic Merge

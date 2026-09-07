@@ -1261,9 +1261,57 @@ export default function App() {
   }, []);
 
   // Deploy Counterfactual Fork Branch
-  const handleDeployFork = () => {
+  const handleDeployFork = async () => {
     if (!selectedNode) return;
     const newId = `fork_${Date.now().toString().slice(-4)}`;
+    showToast(`Deploying counterfactual branch from ${selectedNode.id}...`);
+
+    try {
+      const resp = await fetch("http://localhost:8000/api/fork", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parent_node_id: selectedNode.id,
+          fork_prompt: forkPromptInput,
+          project_subdir: activeWorkflow.projectDir || undefined,
+          target_files: selectedNode.filePath ? [selectedNode.filePath] : (selectedNode.targetFiles || undefined),
+          model: selectedNode.model,
+        }),
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        const forkedNode = {
+          id: data.forkId || newId,
+          promptNum: selectedNode.promptNum,
+          agent: selectedNode.agent,
+          type: "reasoning",
+          title: `Fork: ${forkPromptInput.slice(0, 20)}...`,
+          headerColor: HEADER_COLORS.reasoning,
+          model: data.model || selectedNode.model,
+          agentName: selectedNode.agentName,
+          slmRationale: `Counterfactual branch spawned from Prompt #${selectedNode.promptNum}. Alternative constraints executed by ${data.executedBy || "Gemini"}.`,
+          promptText: forkPromptInput,
+          inputs: selectedNode.inputs,
+          outputs: selectedNode.outputs,
+          tokens: { system: 15, files: 40, tools: 20, history: 25, count: data.tokens || 6800 },
+          diff: data.diff || null,
+          code: data.generatedCode || null,
+          filePath: data.filePath || selectedNode.filePath,
+          x: selectedNode.x + 210,
+          y: selectedNode.y + 110,
+        };
+
+        setStepsData((prev) => [...prev, forkedNode]);
+        setSelectedNode(forkedNode);
+        setForkModalOpen(false);
+        showToast(`Counterfactual branch deployed with live code & diff!`);
+        return;
+      }
+    } catch (err) {
+      console.warn("Backend fork API failed, falling back to local node:", err);
+    }
+
     const forkedNode = {
       id: newId,
       promptNum: selectedNode.promptNum,

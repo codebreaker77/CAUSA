@@ -1,4 +1,4 @@
-﻿"""Causa × Gemini API Client.
+"""Causa × Gemini API Client.
 
 Heterogeneous multi-model routing using Google Gemini API.
 Endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
@@ -230,20 +230,32 @@ class GeminiClient:
 Given a user goal, decompose it into concrete subtasks for a coding agent swarm.
 
 Rules:
-- Each subtask MUST have: title, description, tier (orchestrator/worker/fast/nano), target_file
-- tier assignment:
-  * orchestrator: architecture decisions, system design
-  * worker: complex logic, algorithms, core business code  
-  * fast: standard features, API routes, database models, React components
-  * nano: unit tests, documentation, type stubs, formatting
-- Return ONLY valid JSON. No markdown, no explanation.
-- Format: {"subtasks": [{"title": "...", "description": "...", "tier": "...", "target_file": "...", "dependencies": []}]}"""
+- Each subtask MUST have:
+  * id: "sub_1", "sub_2", etc.
+  * title: short descriptive name
+  * description: clear engineering prompt specifying what functions, classes, or markup to write
+  * tier: orchestrator | worker | fast | nano
+  * target_file: exact relative path (e.g. "index.html", "src/App.jsx", "src/components/Timer.jsx", "tests/timer.test.js")
+  * dependencies: array of predecessor task IDs (e.g. ["sub_1"]) or empty [] for root tasks.
+- DEPENDENCY RULES:
+  * Root tasks (e.g. sub_1 core data/state or index.html) have dependencies: []
+  * Components that use sub_1 must list ["sub_1"] in dependencies.
+  * Unit tests and integration tasks MUST list their implementation predecessors in dependencies.
+- WEB APPLICATION / WEBSITE RULES:
+  * If the user requests a website, web app, frontend, game, landing page, or tool, you MUST ALWAYS include:
+    1. index.html (the HTML5 entrypoint with root div, modern responsive styling, and script tags)
+    2. src/App.jsx or src/App.tsx (the main application component with full UI state)
+    3. Additional components, styling, or logic modules
+    4. Unit test file (e.g. tests/app.test.js)
+  * Never generate only a single isolated utility file for a web project!
+- Return ONLY valid JSON. No markdown fences.
+- Format: {"subtasks": [{"id": "sub_1", "title": "...", "description": "...", "tier": "...", "target_file": "...", "dependencies": []}]}"""
 
     def decompose_goal(self, goal: str) -> Dict:
         """Use the ORCHESTRATOR model to decompose a user goal into subtasks."""
         result = self.generate_for_tier(
             tier=GeminiTier.ORCHESTRATOR,
-            prompt=f"Goal: {goal}\n\nDecompose into 3-6 subtasks as JSON.",
+            prompt=f"Goal: {goal}\n\nDecompose into 3-6 subtasks as JSON respecting dependencies and web entrypoints.",
             system_prompt=self.ORCHESTRATOR_SYSTEM,
             max_tokens=4096,
             temperature=0.1,
@@ -278,10 +290,12 @@ Rules:
     # 4. Worker: Code Generation
     # ------------------------------------------------------------------
 
-    CODE_GEN_SYSTEM = """You are an expert software engineer.
-Write complete, production-quality code. 
-OUTPUT ONLY the file contents. No markdown fences. No explanations. No comments about what you did.
-Start from line 1 of the file. Write complete, runnable code with all imports."""
+    CODE_GEN_SYSTEM = """You are an expert software engineer in the Causa coding harness.
+Write complete, production-ready, fully functional code.
+OUTPUT ONLY the file contents. No markdown fences (no ```). No conversational explanations.
+Start directly from line 1 of the file. Include all imports, styles, and full logic.
+If target file is index.html: write complete HTML5 with <!DOCTYPE html>, modern embedded CSS (clean, responsive, dark/modern design), and script tags so the page can be opened and run immediately in any browser!
+If target file is a test: import the real functions/components from existing files and write comprehensive assertions."""
 
     def generate_code(
         self,
@@ -289,18 +303,28 @@ Start from line 1 of the file. Write complete, runnable code with all imports.""
         file_path: str,
         tier: str = GeminiTier.FAST,
         context: str = "",
+        existing_repo_files: Optional[Dict[str, str]] = None,
     ) -> GeminiGenerationResult:
-        """Generate complete code for a file using the appropriate model tier."""
+        """Generate complete code for a file using the appropriate model tier with repo context."""
         ext = file_path.rsplit(".", 1)[-1] if "." in file_path else "py"
-        lang_map = {"py": "Python", "ts": "TypeScript", "tsx": "TypeScript React",
-                    "js": "JavaScript", "jsx": "JavaScript React", "html": "HTML"}
+        lang_map = {
+            "py": "Python", "ts": "TypeScript", "tsx": "TypeScript React",
+            "js": "JavaScript", "jsx": "JavaScript React", "html": "HTML5",
+            "css": "CSS", "json": "JSON"
+        }
         lang = lang_map.get(ext, ext.upper())
 
-        prompt_parts = [f"Language: {lang}", f"File: {file_path}"]
-        if context:
+        prompt_parts = [f"Language: {lang}", f"Target File: {file_path}"]
+        if existing_repo_files:
+            prompt_parts.append("\n### Existing Repository Context (Dependencies & Prior Subtasks):")
+            for rpath, rcontent in existing_repo_files.items():
+                snippet = rcontent[:1200] if len(rcontent) > 1200 else rcontent
+                prompt_parts.append(f"\n--- File: {rpath} ---\n{snippet}\n")
+        elif context:
             prompt_parts.append(f"\nExisting context:\n{context}")
-        prompt_parts.append(f"\nTask: {task_description}")
-        prompt_parts.append("\nWrite the complete file contents now:")
+
+        prompt_parts.append(f"\nTask Specification:\n{task_description}")
+        prompt_parts.append(f"\nWrite the complete, runnable file contents for {file_path} now (NO markdown fences):")
         prompt = "\n".join(prompt_parts)
 
         return self.generate_for_tier(

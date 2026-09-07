@@ -288,6 +288,53 @@ class TaskPlanner:
         t2_id = f"task_{uuid.uuid4().hex[:6]}"
         t3_id = f"task_{uuid.uuid4().hex[:6]}"
 
+        # Check if the user is asking for a web app, website, or UI
+        is_web = any(k in goal.lower() for k in [
+            "website", "web app", "webapp", "frontend", "landing page",
+            "dashboard", "ui", "page", "react", "html", "game", "calculator"
+        ])
+
+        if is_web:
+            web_ext = "tsx" if "typescript" in goal.lower() or "ts" in goal.lower() else "jsx"
+            return [
+                SubTask(
+                    id=t1_id,
+                    title="Web Application Entrypoint: index.html",
+                    description=f"Create complete standalone responsive HTML5 entrypoint with root container and modern CSS styling for {goal}",
+                    assigned_tier=ModelTier.FAST_CLOUD,
+                    assigned_model=self.MODEL_MAPPINGS[ModelTier.FAST_CLOUD],
+                    target_files=["index.html"],
+                    dependencies=[],
+                ),
+                SubTask(
+                    id=t2_id,
+                    title=f"Root UI Shell: App.{web_ext}",
+                    description=f"Build the main application component with full state, controls, and UI layout for {goal}",
+                    assigned_tier=ModelTier.FRONTIER_HEAVY,
+                    assigned_model=self.MODEL_MAPPINGS[ModelTier.FRONTIER_HEAVY],
+                    target_files=[f"src/App.{web_ext}"],
+                    dependencies=[t1_id],
+                ),
+                SubTask(
+                    id=t3_id,
+                    title=f"Core Feature Engine: {feature_slug}.js",
+                    description=f"Implement state management, game/application logic, and event handlers for {goal}",
+                    assigned_tier=ModelTier.FAST_CLOUD,
+                    assigned_model=self.MODEL_MAPPINGS[ModelTier.FAST_CLOUD],
+                    target_files=[f"src/{feature_slug}.js"],
+                    dependencies=[t1_id],
+                ),
+                SubTask(
+                    id=f"task_{uuid.uuid4().hex[:6]}",
+                    title=f"Automated Test Suite: test_{feature_slug}.js",
+                    description=f"Write assertion test suite verifying component behavior and core logic for {goal}",
+                    assigned_tier=ModelTier.LOCAL_SLM,
+                    assigned_model=self.MODEL_MAPPINGS[ModelTier.LOCAL_SLM],
+                    target_files=[f"tests/test_{feature_slug}.js"],
+                    dependencies=[t2_id],
+                ),
+            ]
+
         # If user explicitly specified files or clear task structure, return instantly
         if explicit_files or len(clean_goal.split()) >= 3:
             return [

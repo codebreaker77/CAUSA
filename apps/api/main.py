@@ -10,13 +10,14 @@ import asyncio
 import concurrent.futures
 import os
 import re
+import uuid
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from packages.slm.client import LocalSLMClient
-from packages.astra.planner import TaskPlanner, ModelTier, SubTask
+from packages.astra.planner import TaskPlanner, ModelTier, SubTask, TaskPlan
 from packages.astra.supervisor import SwarmSupervisor
 from packages.astra.agent_launcher import AgentLauncher, AgentCLIType
 from packages.ferry.proxy import FerryProxy
@@ -100,8 +101,43 @@ class ExecutePlanRequest(BaseModel):
     project_subdir: Optional[str] = None
 
 
+def collect_repo_context(target_dir: str, current_file: str, max_files: int = 6) -> Dict[str, str]:
+    """Scans target_dir for already written files to provide context to downstream subtasks."""
+    context_files: Dict[str, str] = {}
+    if not os.path.exists(target_dir):
+        return context_files
+
+    for root, _, filenames in os.walk(target_dir):
+        for fname in filenames:
+            if fname.startswith(".") or fname.endswith((".pyc", ".map", ".lock")):
+                continue
+            rel_path = os.path.relpath(os.path.join(root, fname), target_dir).replace("\\", "/")
+            if rel_path == current_file.replace("\\", "/"):
+                continue
+            full_p = os.path.join(root, fname)
+            try:
+                with open(full_p, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read(1500)
+                context_files[rel_path] = content
+                if len(context_files) >= max_files:
+                    break
+            except Exception:
+                pass
+        if len(context_files) >= max_files:
+            break
+    return context_files
+
+
+class ForkRequest(BaseModel):
+    parent_node_id: str
+    fork_prompt: str
+    target_files: Optional[List[str]] = None
+    project_subdir: Optional[str] = None
+    model: Optional[str] = None
+
+
 # -------------------------------------------------------------
-# 1. Real SLM Decomposition Endpoint
+# 1. Real SLM / Gemini Decomposition Endpoint
 # -------------------------------------------------------------
 @app.post("/api/decompose")
 def decompose_prompt(req: DecomposeRequest):
@@ -116,7 +152,7 @@ def decompose_prompt(req: DecomposeRequest):
     if gemini_client:
         zen_plan = gemini_client.decompose_goal(prompt_text)
 
-    # Generate plan via Astra planner (for tier routing & AST context)
+    # Generate plan via Astra planner (for fallback & tier routing)
     plan = planner.create_plan(prompt_text)
 
     # Format proposed subtasks for dashboard UI with real heterogeneous Gemini agents
@@ -130,30 +166,46 @@ def decompose_prompt(req: DecomposeRequest):
     # If Gemini returned subtasks, merge them into the plan format
     if zen_plan and zen_plan.get("subtasks"):
         for idx, st in enumerate(zen_plan["subtasks"]):
-            tier_str = st.get("tier", "fast")
-            if tier_str in ("orchestrator", "worker"):
+            sub_id = st.get("id") or f"sub_{idx + 1}"
+            raw_deps = st.get("dependencies", [])
+            clean_deps = []
+            for d in raw_deps:
+                if isinstance(d, int):
+                    clean_deps.append(f"sub_{d}")
+                elif str(d).isdigit():
+                    clean_deps.append(f"sub_{d}")
+                else:
+                    clean_deps.append(str(d))
+
+            tier_str = st.get("tier", "fast").lower()
+            if tier_str in ("orchestrator", "worker", "reasoner"):
                 tier_key = ModelTier.FRONTIER_HEAVY
+                model_name = "gemini-3.5-flash"
             elif tier_str == "nano":
                 tier_key = ModelTier.LOCAL_SLM
+                model_name = "gemini-3.1-flash-lite"
             else:
                 tier_key = ModelTier.FAST_CLOUD
+                model_name = "gemini-3.5-flash-lite"
+
             agent_id, agent_name = agent_mapping[tier_key]
             proposed.append({
-                "id": f"sub_{idx + 1}",
+                "id": sub_id,
                 "agentId": agent_id,
                 "agentName": agent_name,
-                "model": zen_plan.get("orchestrator_model", "gemini-3.5-flash-lite"),
+                "model": model_name,
                 "role": f"{tier_str.upper()} Execution",
                 "prompt": st.get("description", ""),
                 "nodeTitle": st.get("title", f"Task {idx+1}"),
                 "targetFiles": [st.get("target_file", f"src/module_{idx+1}.py")],
+                "dependencies": clean_deps,
                 "synthesizedContext": "",
             })
     else:
         for idx, st in enumerate(plan.subtasks):
             agent_id, agent_name = agent_mapping.get(st.assigned_tier, ("a1", "Gemini-Architect"))
             proposed.append({
-                "id": f"sub_{idx + 1}",
+                "id": st.id,
                 "agentId": agent_id,
                 "agentName": agent_name,
                 "model": st.assigned_model,
@@ -161,6 +213,7 @@ def decompose_prompt(req: DecomposeRequest):
                 "prompt": st.description,
                 "nodeTitle": st.title,
                 "targetFiles": st.target_files,
+                "dependencies": st.dependencies,
                 "synthesizedContext": st.synthesized_context,
             })
 
@@ -177,14 +230,11 @@ def decompose_prompt(req: DecomposeRequest):
 
 
 # -------------------------------------------------------------
-# 2. Execute Swarm Endpoint (Codex, OpenCode & Local SLM)
+# 2. Execute Swarm Endpoint (DAG-Aware Parallel Scheduler)
 # -------------------------------------------------------------
 @app.post("/api/execute")
 def execute_swarm(req: ExecutePlanRequest):
-    """Executes the subtasks using real CLI agents / SLM in parallel sandboxes."""
-    results = []
-    total_tokens = 0
-
+    """Executes the subtasks respecting DAG dependencies in parallel sandboxes."""
     # Determine scoped target directory for this workflow session
     target_dir = workspace_dir
     if req.project_subdir:
@@ -192,24 +242,52 @@ def execute_swarm(req: ExecutePlanRequest):
         target_dir = os.path.join(workspace_dir, clean_subdir)
         os.makedirs(target_dir, exist_ok=True)
 
-    def process_subtask(idx: int, st_dict: Dict[str, Any]) -> Dict[str, Any]:
-        target_files = st_dict.get("targetFiles") or [f"src/module_{idx+1}.py"]
-        assigned_model = st_dict.get("model", "gemma3:latest")
-        agent_name = st_dict.get("agentName", f"Agent_{idx+1}")
-        node_title = st_dict.get("nodeTitle", "Task")
-        prompt_text = st_dict.get("prompt", "")
+    # 1. Build SubTask objects with normalized DAG dependencies
+    subtask_objs: List[SubTask] = []
+    st_dict_by_id: Dict[str, Dict[str, Any]] = {}
 
-        subtask = SubTask(
-            id=st_dict.get("id", f"task_{idx+1}"),
-            title=node_title,
-            description=prompt_text,
-            assigned_tier=ModelTier.FRONTIER_HEAVY if "codex" in assigned_model.lower() else (ModelTier.FAST_CLOUD if "opencode" in assigned_model.lower() else ModelTier.LOCAL_SLM),
+    for idx, st_dict in enumerate(req.subtasks):
+        st_id = st_dict.get("id") or f"sub_{idx+1}"
+        raw_deps = st_dict.get("dependencies", [])
+        clean_deps = [f"sub_{d}" if isinstance(d, int) else str(d) for d in raw_deps]
+        assigned_model = st_dict.get("model", "gemini-3.5-flash-lite")
+        target_files = st_dict.get("targetFiles") or [f"src/module_{idx+1}.py"]
+
+        st_obj = SubTask(
+            id=st_id,
+            title=st_dict.get("nodeTitle", f"Task {idx+1}"),
+            description=st_dict.get("prompt", ""),
+            assigned_tier=ModelTier.FRONTIER_HEAVY if ("3.5-flash" in assigned_model and "lite" not in assigned_model) else (
+                ModelTier.LOCAL_SLM if ("3.1" in assigned_model or "nano" in assigned_model) else ModelTier.FAST_CLOUD
+            ),
             assigned_model=assigned_model,
             target_files=target_files,
+            dependencies=clean_deps,
+            synthesized_context=st_dict.get("synthesizedContext", ""),
         )
+        subtask_objs.append(st_obj)
+        st_dict_by_id[st_id] = st_dict
 
+    plan = TaskPlan(
+        plan_id=f"plan_{uuid.uuid4().hex[:8]}",
+        goal=req.prompt,
+        subtasks=subtask_objs,
+        dependency_graph={t.id: t.dependencies for t in subtask_objs},
+    )
+
+    # 2. Worker runner function
+    def process_subtask(subtask: SubTask) -> Dict[str, Any]:
+        st_dict = st_dict_by_id.get(subtask.id, {})
+        target_files = subtask.target_files
+        assigned_model = subtask.assigned_model
+        agent_name = st_dict.get("agentName", f"Agent_{subtask.id}")
+        node_title = subtask.title
+        prompt_text = subtask.description
         file_path = target_files[0]
         full_dest = os.path.join(target_dir, file_path)
+
+        # Collect repository context from prior subtasks
+        repo_ctx = collect_repo_context(target_dir, file_path)
 
         # Acquire lock/lease for the target file
         lock_mgr.acquire(agent_id=f"{agent_name} ({assigned_model})", file_path=file_path, lock_type="WRITE", ttl_seconds=1800)
@@ -219,26 +297,27 @@ def execute_swarm(req: ExecutePlanRequest):
         executed_by = "gemini_api"
 
         if gemini_client:
-            # Map the assigned_model to a tier
-            if any(x in assigned_model.lower() for x in ["orchestrator", "opus", "3.8", "frontier"]):
+            if any(x in assigned_model.lower() for x in ["orchestrator", "opus", "3.8"]):
+                gen_tier = GeminiTier.ORCHESTRATOR
+            elif any(x in assigned_model.lower() for x in ["worker", "frontier"]) or ("3.5-flash" in assigned_model and "lite" not in assigned_model):
                 gen_tier = GeminiTier.WORKER
-            elif any(x in assigned_model.lower() for x in ["haiku", "3.5", "fast", "worker"]):
-                gen_tier = GeminiTier.FAST
-            else:
+            elif any(x in assigned_model.lower() for x in ["nano", "3.1", "test"]):
                 gen_tier = GeminiTier.NANO
+            else:
+                gen_tier = GeminiTier.FAST
 
             result = gemini_client.generate_code(
                 task_description=prompt_text,
                 file_path=file_path,
                 tier=gen_tier,
-                context=st_dict.get("synthesizedContext", ""),
+                context=subtask.synthesized_context,
+                existing_repo_files=repo_ctx,
             )
             if result.success and result.response_text.strip():
                 code = result.response_text
                 tokens = result.total_tokens
                 executed_by = f"gemini/{result.model}"
             else:
-                # Gemini failed — use a minimal functional stub as absolute last resort
                 code = f'# Gemini generation failed: {result.error}\n# Task: {node_title}\n'
                 executed_by = "stub_fallback"
         else:
@@ -269,7 +348,6 @@ def execute_swarm(req: ExecutePlanRequest):
         )
 
         return {
-            "_sortIdx": idx,
             "subtaskId": subtask.id,
             "agentName": agent_name,
             "model": assigned_model,
@@ -280,22 +358,91 @@ def execute_swarm(req: ExecutePlanRequest):
             "filePath": file_path,
             "absolutePath": full_dest,
             "tokens": tokens if tokens > 0 else 3800,
+            "dependencies": subtask.dependencies,
         }
 
-    # Parallel swarm execution across independent worktrees
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(req.subtasks))) as executor:
-        futures = [executor.submit(process_subtask, idx, st) for idx, st in enumerate(req.subtasks)]
-        for fut in concurrent.futures.as_completed(futures):
-            res_item = fut.result()
-            results.append(res_item)
-            total_tokens += res_item["tokens"]
-
-    results.sort(key=lambda r: r["_sortIdx"])
+    # 3. Execute via the DAG-aware scheduler in SwarmSupervisor!
+    results = supervisor.run_plan(plan, process_subtask, max_workers=max(1, len(plan.subtasks)))
+    total_tokens = sum(r.get("tokens", 0) for r in results if r)
 
     return {
         "success": True,
         "results": results,
         "total_tokens": total_tokens,
+        "workspace": target_dir,
+    }
+
+
+# -------------------------------------------------------------
+# 3. Counterfactual Fork Endpoint
+# -------------------------------------------------------------
+@app.post("/api/fork")
+def fork_counterfactual_branch(req: ForkRequest):
+    """Executes a real counterfactual fork from a parent DAG node."""
+    target_dir = workspace_dir
+    if req.project_subdir:
+        clean_subdir = req.project_subdir.strip("/\\")
+        target_dir = os.path.join(workspace_dir, clean_subdir)
+        os.makedirs(target_dir, exist_ok=True)
+
+    file_path = req.target_files[0] if (req.target_files and len(req.target_files) > 0) else "src/counterfactual.py"
+    full_dest = os.path.join(target_dir, file_path)
+
+    # Gather repo context
+    repo_ctx = collect_repo_context(target_dir, file_path)
+
+    code = ""
+    tokens = 0
+    executed_by = "gemini_api"
+    model_used = req.model or "gemini-3.5-flash-lite"
+
+    if gemini_client:
+        prompt_with_fork = (
+            f"COUNTERFACTUAL FORK OBJECTIVE:\n{req.fork_prompt}\n\n"
+            f"Parent Node ID: {req.parent_node_id}\n"
+            f"Apply the counterfactual constraints and write the updated implementation for {file_path}."
+        )
+        res = gemini_client.generate_code(
+            task_description=prompt_with_fork,
+            file_path=file_path,
+            tier=GeminiTier.FAST,
+            existing_repo_files=repo_ctx,
+        )
+        if res.success and res.response_text.strip():
+            code = res.response_text
+            tokens = res.total_tokens
+            executed_by = f"gemini/{res.model}"
+            model_used = res.model
+        else:
+            code = f"# Counterfactual fork failed: {res.error}\n"
+    else:
+        code = f"# Gemini client unavailable\n"
+
+    # Persist file
+    try:
+        os.makedirs(os.path.dirname(full_dest), exist_ok=True)
+        with open(full_dest, "w", encoding="utf-8") as f:
+            f.write(code)
+    except Exception as e:
+        print(f"[Causa] Fork write error: {e}")
+
+    # Build diff
+    code_lines = [l for l in code.strip().splitlines() if l.strip()]
+    diff_body = "\n".join(f"+ {line}" for line in code_lines[:30])
+    diff_text = f"--- a/{file_path} (Parent: {req.parent_node_id})\n+++ b/{file_path} (Fork)\n@@ -0,0 +1,{min(30, len(code_lines))} @@\n{diff_body}"
+
+    fork_id = f"fork_{uuid.uuid4().hex[:6]}"
+
+    return {
+        "success": True,
+        "forkId": fork_id,
+        "parentNodeId": req.parent_node_id,
+        "filePath": file_path,
+        "generatedCode": code,
+        "diff": diff_text,
+        "tokens": tokens,
+        "executedBy": executed_by,
+        "model": model_used,
         "workspace": target_dir,
     }
 
