@@ -99,9 +99,19 @@ class Blackboard:
     ) -> List[BlackboardEntry]:
         """Convenience method to publish a dictionary of SymbolSignature objects."""
         published: List[BlackboardEntry] = []
+        norm_path = file_path.replace("\\", "/").strip().lower()
+        # Scope symbols by file so equal function names in different modules
+        # cannot overwrite each other; remove exports absent from this revision.
+        namespace = norm_path + "::"
+        with self._lock:
+            stale = [key for key, entry in self._entries.items()
+                     if entry.file_path == norm_path and key.startswith(namespace)
+                     and key[len(namespace):] not in symbols_dict]
+            for key in stale:
+                del self._entries[key]
         for sym_id, sym in symbols_dict.items():
             entry = self.publish(
-                symbol_id=sym_id,
+                symbol_id=namespace + sym_id,
                 name=sym.name,
                 signature=sym.signature,
                 file_path=file_path,
