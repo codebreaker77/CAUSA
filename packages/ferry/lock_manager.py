@@ -11,6 +11,7 @@ Eliminates race conditions and dirty writes across concurrent agents with:
 import time
 import uuid
 import threading
+import os
 from typing import Dict, List, Optional, Tuple, Set, Any
 from enum import Enum
 from pydantic import BaseModel, Field
@@ -83,7 +84,11 @@ class LockManager:
             - lease: Optional[Lease] object if acquired
         """
         norm_path = self._normalize_path(file_path)
-        ttl = ttl_seconds or self.default_ttl
+        if lock_type not in (LeaseLockType.EXCLUSIVE_WRITE, LeaseLockType.SHARED_READ):
+            raise ValueError("Unknown lease type")
+        ttl = self.default_ttl if ttl_seconds is None else ttl_seconds
+        if ttl <= 0:
+            raise ValueError("Lease TTL must be positive")
         now = int(time.time())
 
         with self._lock:
@@ -98,7 +103,12 @@ class LockManager:
                 current_type = current["lock_type"]
 
                 # If same agent already holds the lock, renew/re-enter it
-                if holding_agent == agent_id:
+                owns_write = current_type == LeaseLockType.EXCLUSIVE_WRITE and holding_agent == agent_id
+                sole_reader = current_type == LeaseLockType.SHARED_READ and current["readers"] == {agent_id}
+                if owns_write or sole_reader:
+                    if lock_type == LeaseLockType.EXCLUSIVE_WRITE:
+                        current["lock_type"] = LeaseLockType.EXCLUSIVE_WRITE
+                        current["readers"] = set()
                     current["expires_at"] = now + ttl
                     lease = self._create_and_persist_lease(
                         agent_id=agent_id,
@@ -169,10 +179,13 @@ class LockManager:
                 return False
 
             if current["lock_type"] == LeaseLockType.SHARED_READ:
-                if agent_id in current["readers"]:
-                    current["readers"].remove(agent_id)
-                    if not current["readers"]:
-                        del self._active_leases[norm_path]
+                if agent_id not in current["readers"]:
+                    return False
+                current["readers"].remove(agent_id)
+                if not current["readers"]:
+                    del self._active_leases[norm_path]
+                else:
+                    current["agent_id"] = next(iter(current["readers"]))
             elif current["agent_id"] == agent_id:
                 del self._active_leases[norm_path]
             else:
@@ -196,6 +209,7 @@ class LockManager:
         now = int(time.time())
 
         with self._lock:
+            self._prune_expired_leases(now)
             current = self._active_leases.get(norm_path)
             if not current:
                 return False
@@ -267,7 +281,7 @@ class LockManager:
     # -------------------------------------------------------------
     def _normalize_path(self, path: str) -> str:
         """Normalizes path separators and trims whitespace."""
-        return path.replace("\\", "/").strip().lower()
+        return os.path.normcase(os.path.normpath(path.replace("\\", "/").strip()))
 
     def _prune_expired_leases(self, now: int) -> None:
         """Removes leases whose TTL has expired."""

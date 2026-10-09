@@ -14,6 +14,9 @@ import json
 import os
 import time
 import uuid
+import tempfile
+from pathlib import Path
+from packages.paths import workspace_path, public_source_path
 from typing import Dict, List, Optional, Any, Tuple
 from pydantic import BaseModel, Field
 
@@ -181,7 +184,13 @@ class FerryProxy:
         if not rel_path:
             return ToolExecutionResult(success=False, decision="blocked", error_message="Missing 'path' parameter")
 
-        norm_path = rel_path.replace("\\", "/").strip().lstrip("./")
+        try:
+            abs_path = workspace_path(self.workspace_root, rel_path)
+            norm_path = abs_path.relative_to(Path(self.workspace_root).resolve()).as_posix()
+            if not public_source_path(norm_path):
+                raise ValueError("Private and generated paths cannot be mutated")
+        except ValueError as exc:
+            return ToolExecutionResult(success=False, decision="blocked", error_message=str(exc))
 
         # 1. Boundary & Manifest Checks
         allowed = any(fnmatch.fnmatch(norm_path, pat) for pat in manifest.allowed_write_patterns)
@@ -212,7 +221,6 @@ class FerryProxy:
                 return ToolExecutionResult(success=False, decision="blocked", error_message=err, causal_node_id=node_id)
 
             # 4. Read existing content for diffing
-            abs_path = os.path.join(self.workspace_root, norm_path) if self.workspace_root else norm_path
             old_content = ""
             if os.path.exists(abs_path):
                 try:
@@ -231,8 +239,16 @@ class FerryProxy:
 
             # 6. Commit write to disk
             os.makedirs(os.path.dirname(abs_path), exist_ok=True) if os.path.dirname(abs_path) else None
-            with open(abs_path, "w", encoding="utf-8") as f:
-                f.write(new_content)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=abs_path.parent,
+                                                 delete=False) as f:
+                    temporary = f.name
+                    f.write(new_content)
+                os.replace(temporary, abs_path)
+            finally:
+                if temporary and os.path.exists(temporary):
+                    os.unlink(temporary)
 
             # 7. Publish extracted interface contracts to Blackboard
             symbols = ASTInspector.extract_symbols(new_content, file_path=norm_path)
@@ -274,12 +290,19 @@ class FerryProxy:
         payload: Dict[str, Any],
     ) -> ToolExecutionResult:
         rel_path = payload.get("path") or payload.get("file_path", "")
-        norm_path = rel_path.replace("\\", "/").strip().lstrip("./")
+        try:
+            abs_path = workspace_path(self.workspace_root, rel_path)
+            norm_path = abs_path.relative_to(Path(self.workspace_root).resolve()).as_posix()
+            if not public_source_path(norm_path):
+                raise ValueError("Private and generated paths cannot be read")
+        except ValueError as exc:
+            return ToolExecutionResult(success=False, decision="blocked", error_message=str(exc))
 
         # Acquire shared read lease
-        self.lock_manager.acquire(agent_id, norm_path, lock_type=LeaseLockType.SHARED_READ)
+        acquired, reason, _ = self.lock_manager.acquire(agent_id, norm_path, lock_type=LeaseLockType.SHARED_READ)
+        if not acquired:
+            return ToolExecutionResult(success=False, decision="blocked", error_message=reason)
         try:
-            abs_path = os.path.join(self.workspace_root, norm_path) if self.workspace_root else norm_path
             if not os.path.exists(abs_path):
                 return ToolExecutionResult(success=False, decision="blocked", error_message=f"File not found: {norm_path}")
 
@@ -347,3 +370,4 @@ class FerryProxy:
                 self.ingress.record_tool_call_intent(intent)
             except Exception:
                 pass
+
