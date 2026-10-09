@@ -158,24 +158,15 @@ class SwarmSupervisor:
         actor.state = SwarmAgentState.VERIFYING
         self._emit_event("verification_started", {"agent_id": agent_id})
 
-        # Step A: Construct default verification command if none provided (Compiler Sandbox)
-        if not verification_command and actor.task.target_files:
-            target_file = actor.task.target_files[0]
-            if target_file.endswith((".ts", ".tsx")):
-                verification_command = f"npx tsc --noEmit {target_file}"
-            elif target_file.endswith((".js", ".jsx")):
-                # Attempt to parse with babel, fallback to eslint, fallback to file existence
-                verification_command = f"npx babel {target_file} --dry-run || npx eslint {target_file} || python -c \"import os; assert os.path.exists('{target_file}')\""
-            elif target_file.endswith(".py"):
-                verification_command = f"python -m py_compile {target_file}"
+        if verification_command:
+            passed, log = self.worktree_mgr.run_verification(agent_id, verification_command)
+        else:
+            from packages.astra.verification import verify_files
+            if not actor.task.target_files:
+                passed, log = False, "No target files or verification command supplied"
             else:
-                verification_command = f"python -c \"import os; assert os.path.exists('{target_file}')\""
-
-        if not verification_command:
-            verification_command = "echo 'No verification command specified'"
-
-        # Step B: Run verification command
-        passed, log = self.worktree_mgr.run_verification(agent_id, verification_command)
+                evidence = verify_files(actor.worktree.worktree_path, actor.task.target_files)
+                passed, log = evidence.passed, evidence.log
         actor.verification_passed = passed
         actor.verification_log = log
         if not passed:
