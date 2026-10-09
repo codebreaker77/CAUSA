@@ -6,24 +6,21 @@ Serves endpoints for:
 3. Fetching live telemetry, blackboard contracts, and active leases.
 """
 
-import asyncio
-import concurrent.futures
 import os
-import re
+import json
 import uuid
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from packages.slm.client import LocalSLMClient
 from packages.astra.planner import TaskPlanner, ModelTier, SubTask, TaskPlan
-from packages.astra.supervisor import SwarmSupervisor
-from packages.astra.agent_launcher import AgentLauncher, AgentCLIType
-from packages.ferry.proxy import FerryProxy
-from packages.ferry.lock_manager import LockManager
 from packages.ferry.blackboard import Blackboard
 from dotenv import load_dotenv
+from pathlib import Path
+from packages.paths import workspace_path
+from packages.astra.runtime import ExecutionRuntime
 
 load_dotenv()  # Loads .env file
 
@@ -47,7 +44,6 @@ app.add_middleware(
 
 # Global State & Scoped Workspace Resolution
 blackboard = Blackboard()
-lock_mgr = LockManager(default_ttl_seconds=3600)
 slm_client = LocalSLMClient(default_model="gemma3:latest")
 
 workspace_env = os.environ.get("CAUSA_WORKSPACE_DIR")
@@ -59,35 +55,12 @@ else:
 os.makedirs(workspace_dir, exist_ok=True)
 print(f"[Causa Control Plane] Scoped Workspace: {workspace_dir}")
 
-ferry = FerryProxy(workspace_root=workspace_dir, lock_manager=lock_mgr, blackboard=blackboard)
 planner = TaskPlanner(blackboard=blackboard, slm_client=slm_client, gemini_client=gemini_client)
-supervisor = SwarmSupervisor(repo_root=workspace_dir, ferry_proxy=ferry)
 
-# Seed initial active contracts & leases on the shared Blackboard
-blackboard.publish(
-    symbol_id="session.contract",
-    name="SessionContract",
-    signature="interface SessionContract { id: string; token: string; ttl: number; }",
-    file_path="src/auth/session.ts",
-    agent_id="Auth-Worker (GPT-4o)",
-)
-blackboard.publish(
-    symbol_id="prisma.schema.Session",
-    name="SessionSchema",
-    signature="model Session { id String @id, userId String, expiresAt DateTime }",
-    file_path="prisma/schema.prisma",
-    agent_id="DB-Migration (Gemini 1.5 Pro)",
-)
-blackboard.publish(
-    symbol_id="auth.adapter.lookup",
-    name="adapterLookup",
-    signature="export async function getSession(token: string): Promise<Session | null>",
-    file_path="src/auth/adapter.ts",
-    agent_id="Auth-Worker (GPT-4o)",
-)
-
-lock_mgr.acquire(agent_id="Auth-Worker (GPT-4o)", file_path="src/auth/session.ts", lock_type="READ", ttl_seconds=3600)
-lock_mgr.acquire(agent_id="DB-Migration (Gemini 1.5 Pro)", file_path="prisma/schema.prisma", lock_type="WRITE", ttl_seconds=3600)
+runtime = ExecutionRuntime(Path(workspace_dir) / ".causa")
+app.state.runtime = runtime
+from apps.api.routers.dag import router as runs_router
+app.include_router(runs_router)
 
 
 class DecomposeRequest(BaseModel):
@@ -99,33 +72,6 @@ class ExecutePlanRequest(BaseModel):
     prompt: str
     subtasks: List[Dict[str, Any]]
     project_subdir: Optional[str] = None
-
-
-def collect_repo_context(target_dir: str, current_file: str, max_files: int = 6) -> Dict[str, str]:
-    """Scans target_dir for already written files to provide context to downstream subtasks."""
-    context_files: Dict[str, str] = {}
-    if not os.path.exists(target_dir):
-        return context_files
-
-    for root, _, filenames in os.walk(target_dir):
-        for fname in filenames:
-            if fname.startswith(".") or fname.endswith((".pyc", ".map", ".lock")):
-                continue
-            rel_path = os.path.relpath(os.path.join(root, fname), target_dir).replace("\\", "/")
-            if rel_path == current_file.replace("\\", "/"):
-                continue
-            full_p = os.path.join(root, fname)
-            try:
-                with open(full_p, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read(1500)
-                context_files[rel_path] = content
-                if len(context_files) >= max_files:
-                    break
-            except Exception:
-                pass
-        if len(context_files) >= max_files:
-            break
-    return context_files
 
 
 class ForkRequest(BaseModel):
@@ -234,189 +180,25 @@ def decompose_prompt(req: DecomposeRequest):
 # -------------------------------------------------------------
 @app.post("/api/execute")
 def execute_swarm(req: ExecutePlanRequest):
-    """Executes the subtasks respecting DAG dependencies in parallel sandboxes."""
-    # Determine scoped target directory for this workflow session
-    target_dir = workspace_dir
-    if req.project_subdir:
-        clean_subdir = req.project_subdir.strip("/\\")
-        target_dir = os.path.join(workspace_dir, clean_subdir)
-        os.makedirs(target_dir, exist_ok=True)
-
-    # 1. Build SubTask objects with normalized DAG dependencies
-    subtask_objs: List[SubTask] = []
-    st_dict_by_id: Dict[str, Dict[str, Any]] = {}
-
-    for idx, st_dict in enumerate(req.subtasks):
-        st_id = st_dict.get("id") or f"sub_{idx+1}"
-        raw_deps = st_dict.get("dependencies", [])
-        clean_deps = [f"sub_{d}" if isinstance(d, int) else str(d) for d in raw_deps]
-        assigned_model = st_dict.get("model", "gemini-3.5-flash-lite")
-        target_files = st_dict.get("targetFiles") or [f"src/module_{idx+1}.py"]
-
-        st_obj = SubTask(
-            id=st_id,
-            title=st_dict.get("nodeTitle", f"Task {idx+1}"),
-            description=st_dict.get("prompt", ""),
-            assigned_tier=ModelTier.FRONTIER_HEAVY if ("3.5-flash" in assigned_model and "lite" not in assigned_model) else (
-                ModelTier.LOCAL_SLM if ("3.1" in assigned_model or "nano" in assigned_model) else ModelTier.FAST_CLOUD
-            ),
-            assigned_model=assigned_model,
-            target_files=target_files,
-            dependencies=clean_deps,
-            synthesized_context=st_dict.get("synthesizedContext", ""),
-        )
-        subtask_objs.append(st_obj)
-        st_dict_by_id[st_id] = st_dict
-
-    plan = TaskPlan(
-        plan_id=f"plan_{uuid.uuid4().hex[:8]}",
-        goal=req.prompt,
-        subtasks=subtask_objs,
-        dependency_graph={t.id: t.dependencies for t in subtask_objs},
-    )
-
-    # 2. Worker runner function
-    def process_subtask(subtask: SubTask) -> Dict[str, Any]:
-        st_dict = st_dict_by_id.get(subtask.id, {})
-        target_files = subtask.target_files
-        assigned_model = subtask.assigned_model
-        agent_name = st_dict.get("agentName", f"Agent_{subtask.id}")
-        node_title = subtask.title
-        prompt_text = subtask.description
-        file_path = target_files[0]
-        full_dest = os.path.join(target_dir, file_path)
-
-        # Collect repository context from prior subtasks
-        repo_ctx = collect_repo_context(target_dir, file_path)
-
-        # Acquire lock/lease for the target file
-        lock_mgr.acquire(agent_id=f"{agent_name} ({assigned_model})", file_path=file_path, lock_type="WRITE", ttl_seconds=1800)
-
-        code = ""
-        tokens = 0
-        executed_by = "gemini_api"
-        compiler_log = ""
-        max_retries = 2
-        original_prompt = prompt_text
-
-        for attempt in range(max_retries + 1):
-            if attempt > 0:
-                print(f"[Sandbox Retry {attempt}/{max_retries}] Agent {agent_name} fixing {file_path}")
-                prompt_text = (
-                    f"Objective: {original_prompt}\n\n"
-                    f"Your previous code failed compilation/syntax check. Please fix it.\n"
-                    f"COMPILER ERROR LOG:\n{compiler_log}\n\n"
-                    f"Return the completely fixed file content."
-                )
-
-            if gemini_client:
-                if any(x in assigned_model.lower() for x in ["orchestrator", "opus", "3.8"]):
-                    gen_tier = GeminiTier.ORCHESTRATOR
-                elif any(x in assigned_model.lower() for x in ["worker", "frontier"]) or ("3.5-flash" in assigned_model and "lite" not in assigned_model):
-                    gen_tier = GeminiTier.WORKER
-                elif any(x in assigned_model.lower() for x in ["nano", "3.1", "test"]):
-                    gen_tier = GeminiTier.NANO
-                else:
-                    gen_tier = GeminiTier.FAST
-
-                result = gemini_client.generate_code(
-                    task_description=prompt_text,
-                    file_path=file_path,
-                    tier=gen_tier,
-                    context=subtask.synthesized_context,
-                    existing_repo_files=repo_ctx,
-                )
-                if result.success and result.response_text.strip():
-                    code = result.response_text
-                    tokens += result.total_tokens
-                    executed_by = f"gemini/{result.model}"
-                else:
-                    code = f'# Gemini generation failed: {result.error}\n# Task: {node_title}\n'
-                    executed_by = "stub_fallback"
-                    break
-            else:
-                code = f'# Gemini client not configured. Set GEMINI_API_KEY in .env\n# Task: {node_title}\n'
-                executed_by = "no_client"
-                break
-
-            # Persist file to target directory for verification
-            try:
-                os.makedirs(os.path.dirname(full_dest), exist_ok=True)
-                with open(full_dest, "w", encoding="utf-8") as f:
-                    f.write(code)
-            except Exception as write_err:
-                print(f"[Causa] Write error: {write_err}")
-                break
-
-            # RUN COMPILER VERIFICATION SANDBOX
-            verification_command = None
-            if file_path.endswith((".ts", ".tsx")):
-                verification_command = f"npx tsc --noEmit {file_path}"
-            elif file_path.endswith((".js", ".jsx")):
-                verification_command = f"npx babel {file_path} --dry-run || npx eslint {file_path}"
-            elif file_path.endswith(".py"):
-                verification_command = f"python -m py_compile {file_path}"
-            
-            if verification_command:
-                import subprocess
-                try:
-                    proc = subprocess.run(
-                        verification_command,
-                        shell=True,
-                        cwd=target_dir,
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    if proc.returncode == 0:
-                        break  # Passed sandbox check
-                    else:
-                        compiler_log = proc.stdout + "\n" + proc.stderr
-                except Exception as e:
-                    compiler_log = str(e)
-            else:
-                break  # No verification for this extension, assume success
-
-
-        # 4. Construct unified git diff
-        code_lines = [l for l in code.strip().splitlines() if l.strip()]
-        diff_body = "\n".join(f"+ {line}" for line in code_lines[:30])
-        diff_text = f"--- a/{file_path}\n+++ b/{file_path}\n@@ -0,0 +1,{min(30, len(code_lines))} @@\n{diff_body}"
-
-        # 5. Publish AST contract to Blackboard
-        contract_symbol = f"{node_title.lower().replace(' ', '.')}.contract"
-        blackboard.publish(
-            symbol_id=contract_symbol,
-            name=node_title,
-            signature=f"export function {node_title.replace(' ', '_')}(): Promise<ContractStatus>",
-            file_path=file_path,
-            agent_id=f"{agent_name} ({assigned_model})",
-        )
-
-        return {
-            "subtaskId": subtask.id,
-            "agentName": agent_name,
-            "model": assigned_model,
-            "status": "COMPLETED",
-            "executedBy": executed_by,
-            "generatedCode": code,
-            "diff": diff_text,
-            "filePath": file_path,
-            "absolutePath": full_dest,
-            "tokens": tokens if tokens > 0 else 3800,
-            "dependencies": subtask.dependencies,
-        }
-
-    # 3. Execute via the DAG-aware scheduler in SwarmSupervisor!
-    results = supervisor.run_plan(plan, process_subtask, max_workers=max(1, len(plan.subtasks)))
-    total_tokens = sum(r.get("tokens", 0) for r in results if r)
-
-    return {
-        "success": True,
-        "results": results,
-        "total_tokens": total_tokens,
-        "workspace": target_dir,
-    }
+    """Execute isolated tasks and publish only a fully verified run."""
+    try:
+        target = workspace_path(workspace_dir, req.project_subdir) if req.project_subdir else Path(workspace_dir)
+        subtasks = []
+        for index, item in enumerate(req.subtasks):
+            model = item.get("model", "gemini-3.5-flash-lite")
+            tier = ModelTier.FRONTIER_HEAVY if "lite" not in model else (
+                ModelTier.LOCAL_SLM if "3.1" in model else ModelTier.FAST_CLOUD)
+            subtasks.append(SubTask(
+                id=item.get("id") or f"sub_{index + 1}",
+                title=item.get("nodeTitle", f"Task {index + 1}"),
+                description=item.get("prompt", ""), assigned_model=model, assigned_tier=tier,
+                target_files=item.get("targetFiles") or [],
+                dependencies=item.get("dependencies", []),
+                synthesized_context=item.get("synthesizedContext", "")))
+        plan = TaskPlan(plan_id="plan_" + uuid.uuid4().hex, goal=req.prompt, subtasks=subtasks)
+        return runtime.execute(plan, target, gemini_client)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # -------------------------------------------------------------
@@ -424,73 +206,30 @@ def execute_swarm(req: ExecutePlanRequest):
 # -------------------------------------------------------------
 @app.post("/api/fork")
 def fork_counterfactual_branch(req: ForkRequest):
-    """Executes a real counterfactual fork from a parent DAG node."""
-    target_dir = workspace_dir
-    if req.project_subdir:
-        clean_subdir = req.project_subdir.strip("/\\")
-        target_dir = os.path.join(workspace_dir, clean_subdir)
-        os.makedirs(target_dir, exist_ok=True)
-
-    file_path = req.target_files[0] if (req.target_files and len(req.target_files) > 0) else "src/counterfactual.py"
-    full_dest = os.path.join(target_dir, file_path)
-
-    # Gather repo context
-    repo_ctx = collect_repo_context(target_dir, file_path)
-
-    code = ""
-    tokens = 0
-    executed_by = "gemini_api"
-    model_used = req.model or "gemini-3.5-flash-lite"
-
-    if gemini_client:
-        prompt_with_fork = (
-            f"COUNTERFACTUAL FORK OBJECTIVE:\n{req.fork_prompt}\n\n"
-            f"Parent Node ID: {req.parent_node_id}\n"
-            f"Apply the counterfactual constraints and write the updated implementation for {file_path}."
-        )
-        res = gemini_client.generate_code(
-            task_description=prompt_with_fork,
-            file_path=file_path,
-            tier=GeminiTier.FAST,
-            existing_repo_files=repo_ctx,
-        )
-        if res.success and res.response_text.strip():
-            code = res.response_text
-            tokens = res.total_tokens
-            executed_by = f"gemini/{res.model}"
-            model_used = res.model
-        else:
-            code = f"# Counterfactual fork failed: {res.error}\n"
-    else:
-        code = f"# Gemini client unavailable\n"
-
-    # Persist file
+    """Preview an alternative from an actual recorded commit without overwriting source."""
+    parent = runtime.storage.get_node(req.parent_node_id)
+    if not parent or not parent.git_commit_hash:
+        raise HTTPException(status_code=404, detail="Parent has no recorded checkpoint")
     try:
-        os.makedirs(os.path.dirname(full_dest), exist_ok=True)
-        with open(full_dest, "w", encoding="utf-8") as f:
-            f.write(code)
-    except Exception as e:
-        print(f"[Causa] Fork write error: {e}")
-
-    # Build diff
-    code_lines = [l for l in code.strip().splitlines() if l.strip()]
-    diff_body = "\n".join(f"+ {line}" for line in code_lines[:30])
-    diff_text = f"--- a/{file_path} (Parent: {req.parent_node_id})\n+++ b/{file_path} (Fork)\n@@ -0,0 +1,{min(30, len(code_lines))} @@\n{diff_body}"
-
-    fork_id = f"fork_{uuid.uuid4().hex[:6]}"
-
-    return {
-        "success": True,
-        "forkId": fork_id,
-        "parentNodeId": req.parent_node_id,
-        "filePath": file_path,
-        "generatedCode": code,
-        "diff": diff_text,
-        "tokens": tokens,
-        "executedBy": executed_by,
-        "model": model_used,
-        "workspace": target_dir,
-    }
+        parent_repo = workspace_path(runtime.state_root, f"runs/{parent.session_id}/repo")
+        snapshot_id = "fork_base_" + uuid.uuid4().hex
+        checkpoint = runtime.git(parent_repo, "rev-parse", "--verify", parent.git_commit_hash + "^{commit}")
+        snapshot = workspace_path(runtime.state_root, snapshot_id)
+        runtime.git(parent_repo, "worktree", "add", "--detach", str(snapshot), checkpoint)
+        metadata = json.loads(parent.metadata or "{}")
+        targets = req.target_files or [metadata.get("result", {}).get("filePath", "src/counterfactual.py")]
+        task = SubTask(id="counterfactual", title="Counterfactual", description=req.fork_prompt,
+                       assigned_tier=ModelTier.FAST_CLOUD,
+                       assigned_model=req.model or "gemini-3.5-flash-lite", target_files=targets)
+        result = runtime.execute(TaskPlan(plan_id=snapshot_id, goal=req.fork_prompt, subtasks=[task]),
+                                 snapshot, gemini_client, apply=False, parent_node=parent.id)
+        first = result["results"][0] if result["results"] else {}
+        return {**result, "forkId": result["runId"], "parentNodeId": parent.id,
+                "filePath": first.get("filePath"), "generatedCode": first.get("generatedCode", ""),
+                "tokens": result["total_tokens"], "model": first.get("model"),
+                "executedBy": "isolated_runtime"}
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # -------------------------------------------------------------
@@ -511,11 +250,19 @@ async def get_workspace():
 # -------------------------------------------------------------
 @app.get("/api/telemetry")
 async def get_telemetry():
+    runs = runtime.list_runs(1)
+    latest = runs[0] if runs else {}
     return {
         "workspace": workspace_dir,
-        "contracts": blackboard.get_all_contracts(),
-        "leases": lock_mgr.list_active_leases(),
-        "metrics": supervisor.get_swarm_metrics(),
+        "contracts": latest.get("contracts", []),
+        "leases": [],
+        "metrics": {
+            "run_id": latest.get("runId"),
+            "total_tokens": latest.get("total_tokens", 0),
+            "total_cost_usd": latest.get("total_cost_usd", 0),
+            "states": {state: sum(r["status"] == state for r in latest.get("results", []))
+                       for state in ("COMPLETED", "FAILED", "BLOCKED")},
+        },
     }
 
 

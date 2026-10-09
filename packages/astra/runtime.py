@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import threading
 import uuid
+import re
 from pathlib import Path
 
 from packages.astra.planner import TaskPlan
@@ -79,6 +80,19 @@ class ExecutionRuntime:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
         return result.stdout.strip()
 
+    def get_run(self, run_id):
+        if not re.fullmatch(r"run_[0-9a-f]{32}", run_id):
+            raise ValueError("Invalid run ID")
+        report = workspace_path(self.state_root, f"runs/{run_id}/result.json")
+        if not report.exists():
+            raise FileNotFoundError("Run not found or still executing")
+        return json.loads(report.read_text(encoding="utf-8"))
+
+    def list_runs(self, limit=50):
+        root = self.state_root / "runs"
+        reports = sorted(root.glob("run_*/result.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return [self.get_run(path.parent.name) for path in reports[:limit]]
+
     def record(self, run_id, agent_id, kind, status="success", parent=None,
                commit=None, worktree=None, prompt=None, metadata=None):
         node = CausalNode(id="node_" + uuid.uuid4().hex, session_id=run_id, agent_id=agent_id,
@@ -103,6 +117,8 @@ class ExecutionRuntime:
                 workspace_path(source, relative)
                 if not public_source_path(relative):
                     raise ValueError("Targets must be public source files")
+            task.target_files = [workspace_path(source, relative).relative_to(source).as_posix()
+                                 for relative in task.target_files]
         with self._projects_guard:
             project_lock = self._project_locks.setdefault(str(source), threading.Lock())
         if not project_lock.acquire(blocking=False):
@@ -192,6 +208,10 @@ class ExecutionRuntime:
                             parent = self.record(run_id, agent, CausalNodeType.FILE_MUTATION,
                                 parent=parent, worktree=tree.worktree_path,
                                 metadata={"file": relative, "sha256": digest(previous.encode())})
+                            for diff in written.ast_diffs:
+                                from packages.fullerence.types import ASTDiff
+                                diff["causal_node_id"] = parent
+                                self.storage.insert_ast_diff(ASTDiff(**diff))
                             break
                         feedback = evidence.log if evidence else written.error_message
                     else:
@@ -224,6 +244,7 @@ class ExecutionRuntime:
                     result.update(status="COMPLETED", verificationLevel=combined.level,
                                   verificationLog=combined.log, commit=commit,
                                   generatedCode=workspace_path(repo, task.target_files[0]).read_text(encoding="utf-8"))
+                    result["diff"] = self.git(repo, "diff", tree.base_commit, tree.branch_name)
                     result["causalNodeId"] = self.record(run_id, agent, CausalNodeType.FILE_MUTATION,
                         parent=parent, commit=commit, worktree=repo, metadata={"result": result})
                     checkpoints[task.id] = result["causalNodeId"]
@@ -237,7 +258,9 @@ class ExecutionRuntime:
             return result
 
         scheduler = SwarmSupervisor.__new__(SwarmSupervisor)
-        scheduler.on_event = None
+        scheduler.on_event = lambda event, data: self.record(run_id, "scheduler", CausalNodeType.TEST_RUN,
+            status="blocked" if event == "task_blocked" else "failed" if event == "task_failed" else "success",
+            parent=root_node, metadata={"event": event, **data})
         results = scheduler.run_plan(plan, worker, max_workers=max_workers)
         success = bool(results) and all(r["status"] == "COMPLETED" for r in results)
         changed = self.git(repo, "diff", "--name-only", base_commit, "HEAD").splitlines()
@@ -277,5 +300,6 @@ class ExecutionRuntime:
                   "total_cost_usd": total_cost[0], "workspace": str(repo), "source": str(source),
                   "baseCommit": base_commit, "headCommit": self.git(repo, "rev-parse", "HEAD"),
                   "diff": self.git(repo, "diff", base_commit, "HEAD"), "error": error}
+        output["contracts"] = [entry.model_dump() for entry in board.get_all_contracts()]
         (run_dir / "result.json").write_text(json.dumps(output, indent=2), encoding="utf-8")
         return output
