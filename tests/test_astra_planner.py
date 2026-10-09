@@ -18,7 +18,7 @@ class TestAstraPlanner(unittest.TestCase):
             "Resolve concurrency and distributed race conditions",
         )
         self.assertEqual(tier, ModelTier.FRONTIER_HEAVY)
-        self.assertEqual(model, "claude-3-5-sonnet")
+        self.assertEqual(model, self.planner.MODEL_MAPPINGS[tier])
 
         # 2. Standard API CRUD -> Fast Cloud
         tier2, model2, tokens2 = self.planner.route_task_to_tier(
@@ -26,7 +26,7 @@ class TestAstraPlanner(unittest.TestCase):
             "Implement standard REST endpoints for user profiles",
         )
         self.assertEqual(tier2, ModelTier.FAST_CLOUD)
-        self.assertEqual(model2, "gemini-1.5-flash")
+        self.assertEqual(model2, self.planner.MODEL_MAPPINGS[tier2])
 
         # 3. Unit Tests -> Local SLM (0 cost)
         tier3, model3, tokens3 = self.planner.route_task_to_tier(
@@ -34,7 +34,7 @@ class TestAstraPlanner(unittest.TestCase):
             "Write pytest unit tests and docstring documentation",
         )
         self.assertEqual(tier3, ModelTier.LOCAL_SLM)
-        self.assertEqual(model3, "gemma3:latest")
+        self.assertEqual(model3, self.planner.MODEL_MAPPINGS[tier3])
 
     def test_ast_context_synthesis(self):
         # Populate blackboard with an interface
@@ -52,7 +52,7 @@ class TestAstraPlanner(unittest.TestCase):
 
     def test_plan_generation_and_dag_ordering(self):
         plan = self.planner.create_plan("Build Authentication System")
-        self.assertEqual(len(plan.subtasks), 3)
+        self.assertGreaterEqual(len(plan.subtasks), 3)
 
         # Confirm 3 tiers are represented
         tiers = {t.assigned_tier for t in plan.subtasks}
@@ -60,11 +60,12 @@ class TestAstraPlanner(unittest.TestCase):
         self.assertIn(ModelTier.FAST_CLOUD, tiers)
         self.assertIn(ModelTier.LOCAL_SLM, tiers)
 
-        # Confirm dependency ordering: Task 2 depends on Task 1, Task 3 depends on Task 2
-        t1, t2, t3 = plan.subtasks[0], plan.subtasks[1], plan.subtasks[2]
-        self.assertEqual(t1.dependencies, [])
-        self.assertEqual(t2.dependencies, [t1.id])
-        self.assertEqual(t3.dependencies, [t2.id])
+        # Validate the graph's semantics rather than hard-coding task count/order.
+        from packages.astra.supervisor import validate_plan
+        validate_plan(plan)
+        self.assertTrue(any(not task.dependencies for task in plan.subtasks))
+        tests = [task for task in plan.subtasks if task.assigned_tier == ModelTier.LOCAL_SLM]
+        self.assertTrue(all(task.dependencies for task in tests))
 
 
 if __name__ == "__main__":

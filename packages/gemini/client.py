@@ -150,7 +150,11 @@ class GeminiClient:
                 # Extract text
                 candidate = body["candidates"][0]
                 parts = candidate.get("content", {}).get("parts", [])
-                text = "".join(p.get("text", "") for p in parts)
+                text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+                finish = candidate.get("finishReason", "STOP")
+                if finish != "STOP" or not text.strip():
+                    return GeminiGenerationResult(success=False, model=model, tier=tier,
+                        error=f"Incomplete generation: {finish}", error_type="GenerationError")
 
                 # Token accounting
                 usage = body.get("usageMetadata", {})
@@ -226,34 +230,23 @@ class GeminiClient:
     # 3. Orchestrator: Task Decomposition
     # ------------------------------------------------------------------
 
-    ORCHESTRATOR_SYSTEM = """You are Astra, the elite Causa swarm orchestrator (like ClaudeCode/v0).
-Given a user goal, you MUST decompose it into a massive, highly granular, parallelized subtask DAG for a coding agent swarm. 
-
-CRITICAL DIRECTIVES:
-1. NEVER limit yourself to 5 agents. Complex apps require 10-25 subtasks! (e.g., separate tasks for App.jsx, Header.jsx, Sidebar.jsx, AuthStore.js, ThemeProvider.jsx, ApiUtils.js, tests for each).
-2. Decompose into the smallest possible atomic units to maximize parallel swarm execution.
-3. Each subtask MUST have:
-  * id: "sub_1", "sub_2", etc.
-  * title: short descriptive name
-  * description: explicit, highly detailed engineering prompt. If it's a UI component, explicitly demand beautiful, modern design, Lucide icons, and fluid animations.
-  * tier: orchestrator | worker | fast | nano
-  * target_file: exact relative path (e.g., "src/components/Sidebar.jsx")
-  * dependencies: array of predecessor task IDs (e.g. ["sub_1"]) or empty [] for root tasks.
-4. DEPENDENCY RULES:
-  * Root tasks (e.g., stores, configs, index.html) have dependencies: []
-  * Granular UI components wait for stores/configs.
-  * The main App.jsx waits for all UI components.
-5. WEB APPLICATION / UI EXCELLENCE:
-  * You MUST scaffold a production-grade architecture (hooks, contexts, utils, components).
-  * Always include a beautiful, modern index.html entrypoint.
-- Return ONLY valid JSON. No markdown fences.
-- Format: {"subtasks": [{"id": "sub_1", "title": "...", "description": "...", "tier": "...", "target_file": "...", "dependencies": []}]}"""
+    ORCHESTRATOR_SYSTEM = """You are Astra, a software engineering planner.
+Use the smallest task DAG that satisfies the goal. Parallelize only independent
+work with stable interfaces. Do not require a fixed number of agents or files.
+For bug fixes, preserve existing architecture and scope. For new applications,
+include runnable entrypoints, dependencies and behavioral tests. Do not add
+unrequested frameworks, features or libraries.
+Return ONLY JSON: {"subtasks": [{"id": "sub_1", "title": "...",
+"description": "Concrete behavior and acceptance criteria", "tier": "worker|fast|nano",
+"target_file": "relative/path", "dependencies": []}]}.
+Every dependency must refer to a unique task ID. Tests depend on implementations.
+Tasks modifying the same file must be ordered by dependencies."""
 
     def decompose_goal(self, goal: str) -> Dict:
         """Use the ORCHESTRATOR model to decompose a user goal into subtasks."""
         result = self.generate_for_tier(
             tier=GeminiTier.ORCHESTRATOR,
-            prompt=f"Goal: {goal}\n\nDecompose into as many subtasks as needed (10-25 for full apps) as JSON respecting dependencies and web entrypoints.",
+            prompt=f"Goal: {goal}\n\nReturn a minimal task DAG with concrete acceptance criteria and valid dependencies.",
             system_prompt=self.ORCHESTRATOR_SYSTEM,
             max_tokens=4096,
             temperature=0.1,
@@ -281,19 +274,15 @@ CRITICAL DIRECTIVES:
     # 4. Worker: Code Generation
     # ------------------------------------------------------------------
 
-    CODE_GEN_SYSTEM = """You are an elite, world-class frontend engineer and UI/UX designer (like Claude Design / v0).
-Your goal is to write breathtaking, production-ready, fully functional code. 
-NEVER output generic, basic, or ugly boilerplate (like "Welcome to App"). 
-CRITICAL DESIGN DIRECTIVES:
-1. VISUAL EXCELLENCE: Use modern, sophisticated design patterns. Implement deep, rich dark modes or crisp, high-contrast light modes. 
-2. TYPOGRAPHY & SPACING: Use generous padding, rounded corners (xl or 2xl), subtle borders, and beautiful typography (sans-serif, inter).
-3. ICONS & MICROINTERACTIONS: Always integrate `lucide-react` for iconography. Add hover states, active states, and fluid transitions (CSS transitions or framer-motion).
-4. ARCHITECTURE: Write clean, modular, scalable React/JS/TS code. Use modern hooks and clean state management.
-5. NO PLACEHOLDERS: Implement the actual requested functionality completely. No 'TODO's. 
-OUTPUT FORMAT:
-- OUTPUT ONLY the file contents. No markdown fences (no ```). No conversational explanations.
-- Start directly from line 1 of the file. Include all imports, styles, and full logic.
-- If target file is index.html: write complete HTML5 with <!DOCTYPE html>, Tailwind CSS via CDN (or beautiful custom CSS), Lucide icons via CDN, and a stunning background/layout."""
+    CODE_GEN_SYSTEM = """You are a software engineer working in an existing repository.
+Implement the requested behavior, preserve unrelated behavior and public APIs,
+and follow the repository's language, conventions and dependency choices.
+Read the complete supplied target file before replacing it. Never invent imports,
+contracts or test results. Tests must exercise the real implementation and assert
+observable behavior. Fix the reported failure rather than weakening checks.
+For frontend work, preserve the requested design and implement working interactions;
+do not add icon, animation or styling libraries unless available or requested.
+Return only complete file contents, without markdown fences or commentary."""
 
     def generate_code(
         self,
@@ -316,8 +305,7 @@ OUTPUT FORMAT:
         if existing_repo_files:
             prompt_parts.append("\n### Existing Repository Context (Dependencies & Prior Subtasks):")
             for rpath, rcontent in existing_repo_files.items():
-                snippet = rcontent[:1200] if len(rcontent) > 1200 else rcontent
-                prompt_parts.append(f"\n--- File: {rpath} ---\n{snippet}\n")
+                prompt_parts.append(f"\n--- File: {rpath} ---\n{rcontent}\n")
         elif context:
             prompt_parts.append(f"\nExisting context:\n{context}")
 
