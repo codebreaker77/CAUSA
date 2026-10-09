@@ -215,100 +215,65 @@ class SwarmSupervisor:
         - Detects and raises on cycles/deadlocks.
         """
         subtasks = plan.subtasks
+        validate_plan(plan)
         if not subtasks:
             return []
-
-        completed_ids: Set[str] = set()
-        running_futures: Dict[concurrent.futures.Future, SubTask] = {}
-        results_by_id: Dict[str, Any] = {}
-        pending_tasks: Dict[str, SubTask] = {t.id: t for t in subtasks}
-
-        # Normalize dependencies: handle string IDs, 'sub_X', and integer indices
-        task_deps: Dict[str, Set[str]] = {}
-        for idx, t in enumerate(subtasks):
-            normalized = set()
-            for d in t.dependencies:
-                if isinstance(d, int):
-                    if 0 <= d < len(subtasks):
-                        normalized.add(subtasks[d].id)
-                    elif 1 <= d <= len(subtasks):
-                        normalized.add(subtasks[d - 1].id)
-                else:
-                    d_str = str(d).strip()
-                    if d_str in pending_tasks:
-                        normalized.add(d_str)
-                    elif d_str.isdigit():
-                        d_num = int(d_str)
-                        if 0 <= d_num < len(subtasks):
-                            normalized.add(subtasks[d_num].id)
-                        elif 1 <= d_num <= len(subtasks):
-                            normalized.add(subtasks[d_num - 1].id)
-                    else:
-                        normalized.add(d_str)
-            task_deps[t.id] = normalized
-
+        successful = set()
+        terminal = set()
+        results = {}
+        running = {}
+        pending = {task.id: task for task in subtasks}
         pool_size = max(1, min(max_workers, len(subtasks)))
-
         with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as executor:
-            while len(completed_ids) < len(subtasks):
-                # 1. Identify ready tasks whose dependencies are fully completed
-                ready_tasks = [
-                    t for t_id, t in pending_tasks.items()
-                    if t_id not in completed_ids
-                    and t not in running_futures.values()
-                    and task_deps[t_id].issubset(completed_ids)
-                ]
-
-                # 2. Submit all ready tasks concurrently
-                for task in ready_tasks:
-                    self._emit_event("task_unblocked", {
-                        "task_id": task.id,
-                        "title": task.title,
-                        "dependencies": list(task_deps[task.id]),
-                    })
-                    future = executor.submit(run_fn, task)
-                    running_futures[future] = task
-
-                # 3. Check for cycle/deadlock
-                if not running_futures and not ready_tasks and len(completed_ids) < len(subtasks):
-                    unmet = {
-                        t_id: list(task_deps[t_id] - completed_ids)
-                        for t_id in pending_tasks
-                        if t_id not in completed_ids
-                    }
-                    error_msg = f"DAG cycle or unresolvable dependencies detected: {unmet}"
-                    self._emit_event("dag_cycle_detected", {"unmet_dependencies": unmet})
-                    raise RuntimeError(error_msg)
-
-                # 4. Wait for at least one running task to complete
-                done, _ = concurrent.futures.wait(
-                    running_futures.keys(),
-                    return_when=concurrent.futures.FIRST_COMPLETED,
-                )
-
-                # 5. Process completed futures
-                for fut in done:
-                    completed_task = running_futures.pop(fut)
-                    try:
-                        res = fut.result()
-                    except Exception as exc:
-                        res = {
-                            "subtaskId": completed_task.id,
-                            "status": "FAILED",
-                            "error": str(exc),
+            while pending or running:
+                # Propagate failures through the DAG without running consumers.
+                for task_id, task in list(pending.items()):
+                    failed_deps = set(task.dependencies) & (terminal - successful)
+                    if failed_deps:
+                        results[task_id] = {
+                            "subtaskId": task_id, "status": "BLOCKED", "tokens": 0,
+                            "error": "Failed dependencies: " + ", ".join(sorted(failed_deps)),
                         }
-                    results_by_id[completed_task.id] = res
-                    completed_ids.add(completed_task.id)
-
-                    self._emit_event("task_completed", {
-                        "task_id": completed_task.id,
-                        "title": completed_task.title,
-                        "completed_count": len(completed_ids),
-                        "total_count": len(subtasks),
-                    })
-
-        # Return results in the original subtask order
-        return [results_by_id.get(t.id) for t in subtasks]
+                        terminal.add(task_id)
+                        del pending[task_id]
+                        self._emit_event("task_blocked", results[task_id])
+                occupied = {os.path.normcase(os.path.normpath(path))
+                            for task in running.values() for path in task.target_files}
+                for task_id, task in list(pending.items()):
+                    paths = {os.path.normcase(os.path.normpath(path)) for path in task.target_files}
+                    if len(running) >= pool_size:
+                        break
+                    if set(task.dependencies) <= successful and not paths & occupied:
+                        del pending[task_id]
+                        occupied.update(paths)
+                        running[executor.submit(run_fn, task)] = task
+                        self._emit_event("task_unblocked", {"task_id": task_id})
+                if not running:
+                    if pending:
+                        # Failure propagation may need another iteration for descendants.
+                        continue
+                    break
+                done, _ = concurrent.futures.wait(
+                    running, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    task = running.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = {"subtaskId": task.id, "status": "FAILED",
+                                  "tokens": 0, "error": str(exc)}
+                    results[task.id] = result
+                    terminal.add(task.id)
+                    passed = result is not False and result is not None
+                    if isinstance(result, dict):
+                        passed = (result.get("success", True) is not False and
+                                  str(result.get("status", "COMPLETED")).upper()
+                                  in {"COMPLETED", "MERGED", "SUCCESS"})
+                    if passed:
+                        successful.add(task.id)
+                    self._emit_event("task_completed" if passed else "task_failed",
+                                     {"task_id": task.id, "status": "COMPLETED" if passed else "FAILED"})
+        return [results[task.id] for task in subtasks]
 
     # -------------------------------------------------------------
     # 5. Swarm Telemetry & Aggregation
@@ -365,3 +330,22 @@ class SwarmSupervisor:
                 self.on_event(event_type, data)
             except Exception:
                 pass
+
+
+def validate_plan(plan: TaskPlan) -> None:
+    """Reject malformed DAGs before any worker has side effects."""
+    tasks = {task.id: task for task in plan.subtasks}
+    if len(tasks) != len(plan.subtasks):
+        raise ValueError("Task IDs must be unique")
+    for task in plan.subtasks:
+        if not task.id.strip():
+            raise ValueError("Task IDs must not be empty")
+        missing = set(task.dependencies) - tasks.keys()
+        if missing:
+            raise ValueError(f"Unknown dependencies for {task.id}: {sorted(missing)}")
+    remaining = {key: set(task.dependencies) for key, task in tasks.items()}
+    while remaining:
+        ready = {key for key, deps in remaining.items() if not deps}
+        if not ready:
+            raise ValueError("Task dependency graph contains a cycle")
+        remaining = {key: deps - ready for key, deps in remaining.items() if key not in ready}
