@@ -295,42 +295,88 @@ def execute_swarm(req: ExecutePlanRequest):
         code = ""
         tokens = 0
         executed_by = "gemini_api"
+        compiler_log = ""
+        max_retries = 2
+        original_prompt = prompt_text
 
-        if gemini_client:
-            if any(x in assigned_model.lower() for x in ["orchestrator", "opus", "3.8"]):
-                gen_tier = GeminiTier.ORCHESTRATOR
-            elif any(x in assigned_model.lower() for x in ["worker", "frontier"]) or ("3.5-flash" in assigned_model and "lite" not in assigned_model):
-                gen_tier = GeminiTier.WORKER
-            elif any(x in assigned_model.lower() for x in ["nano", "3.1", "test"]):
-                gen_tier = GeminiTier.NANO
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                print(f"[Sandbox Retry {attempt}/{max_retries}] Agent {agent_name} fixing {file_path}")
+                prompt_text = (
+                    f"Objective: {original_prompt}\n\n"
+                    f"Your previous code failed compilation/syntax check. Please fix it.\n"
+                    f"COMPILER ERROR LOG:\n{compiler_log}\n\n"
+                    f"Return the completely fixed file content."
+                )
+
+            if gemini_client:
+                if any(x in assigned_model.lower() for x in ["orchestrator", "opus", "3.8"]):
+                    gen_tier = GeminiTier.ORCHESTRATOR
+                elif any(x in assigned_model.lower() for x in ["worker", "frontier"]) or ("3.5-flash" in assigned_model and "lite" not in assigned_model):
+                    gen_tier = GeminiTier.WORKER
+                elif any(x in assigned_model.lower() for x in ["nano", "3.1", "test"]):
+                    gen_tier = GeminiTier.NANO
+                else:
+                    gen_tier = GeminiTier.FAST
+
+                result = gemini_client.generate_code(
+                    task_description=prompt_text,
+                    file_path=file_path,
+                    tier=gen_tier,
+                    context=subtask.synthesized_context,
+                    existing_repo_files=repo_ctx,
+                )
+                if result.success and result.response_text.strip():
+                    code = result.response_text
+                    tokens += result.total_tokens
+                    executed_by = f"gemini/{result.model}"
+                else:
+                    code = f'# Gemini generation failed: {result.error}\n# Task: {node_title}\n'
+                    executed_by = "stub_fallback"
+                    break
             else:
-                gen_tier = GeminiTier.FAST
+                code = f'# Gemini client not configured. Set GEMINI_API_KEY in .env\n# Task: {node_title}\n'
+                executed_by = "no_client"
+                break
 
-            result = gemini_client.generate_code(
-                task_description=prompt_text,
-                file_path=file_path,
-                tier=gen_tier,
-                context=subtask.synthesized_context,
-                existing_repo_files=repo_ctx,
-            )
-            if result.success and result.response_text.strip():
-                code = result.response_text
-                tokens = result.total_tokens
-                executed_by = f"gemini/{result.model}"
+            # Persist file to target directory for verification
+            try:
+                os.makedirs(os.path.dirname(full_dest), exist_ok=True)
+                with open(full_dest, "w", encoding="utf-8") as f:
+                    f.write(code)
+            except Exception as write_err:
+                print(f"[Causa] Write error: {write_err}")
+                break
+
+            # RUN COMPILER VERIFICATION SANDBOX
+            verification_command = None
+            if file_path.endswith((".ts", ".tsx")):
+                verification_command = f"npx tsc --noEmit {file_path}"
+            elif file_path.endswith((".js", ".jsx")):
+                verification_command = f"npx babel {file_path} --dry-run || npx eslint {file_path}"
+            elif file_path.endswith(".py"):
+                verification_command = f"python -m py_compile {file_path}"
+            
+            if verification_command:
+                import subprocess
+                try:
+                    proc = subprocess.run(
+                        verification_command,
+                        shell=True,
+                        cwd=target_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if proc.returncode == 0:
+                        break  # Passed sandbox check
+                    else:
+                        compiler_log = proc.stdout + "\n" + proc.stderr
+                except Exception as e:
+                    compiler_log = str(e)
             else:
-                code = f'# Gemini generation failed: {result.error}\n# Task: {node_title}\n'
-                executed_by = "stub_fallback"
-        else:
-            code = f'# Gemini client not configured. Set GEMINI_API_KEY in .env\n# Task: {node_title}\n'
-            executed_by = "no_client"
+                break  # No verification for this extension, assume success
 
-        # 3. Persist file to target directory
-        try:
-            os.makedirs(os.path.dirname(full_dest), exist_ok=True)
-            with open(full_dest, "w", encoding="utf-8") as f:
-                f.write(code)
-        except Exception as write_err:
-            print(f"[Causa] Write error: {write_err}")
 
         # 4. Construct unified git diff
         code_lines = [l for l in code.strip().splitlines() if l.strip()]

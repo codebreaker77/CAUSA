@@ -158,18 +158,33 @@ class SwarmSupervisor:
         actor.state = SwarmAgentState.VERIFYING
         self._emit_event("verification_started", {"agent_id": agent_id})
 
-        # Step A: Run verification command if requested
-        if verification_command:
-            passed, log = self.worktree_mgr.run_verification(agent_id, verification_command)
-            actor.verification_passed = passed
-            actor.verification_log = log
-            if not passed:
-                actor.state = SwarmAgentState.FAILED
-                actor.error_message = f"Pre-merge verification failed: {log}"
-                self._emit_event("verification_failed", {"agent_id": agent_id, "log": log})
-                return False
+        # Step A: Construct default verification command if none provided (Compiler Sandbox)
+        if not verification_command and actor.task.target_files:
+            target_file = actor.task.target_files[0]
+            if target_file.endswith((".ts", ".tsx")):
+                verification_command = f"npx tsc --noEmit {target_file}"
+            elif target_file.endswith((".js", ".jsx")):
+                # Attempt to parse with babel, fallback to eslint, fallback to file existence
+                verification_command = f"npx babel {target_file} --dry-run || npx eslint {target_file} || python -c \"import os; assert os.path.exists('{target_file}')\""
+            elif target_file.endswith(".py"):
+                verification_command = f"python -m py_compile {target_file}"
+            else:
+                verification_command = f"python -c \"import os; assert os.path.exists('{target_file}')\""
 
-        # Step B: Attempt Atomic 3-Way Merge
+        if not verification_command:
+            verification_command = "echo 'No verification command specified'"
+
+        # Step B: Run verification command
+        passed, log = self.worktree_mgr.run_verification(agent_id, verification_command)
+        actor.verification_passed = passed
+        actor.verification_log = log
+        if not passed:
+            actor.state = SwarmAgentState.FAILED
+            actor.error_message = f"Pre-merge verification failed: {log}"
+            self._emit_event("verification_failed", {"agent_id": agent_id, "log": log})
+            return False
+
+        # Step C: Attempt Atomic 3-Way Merge
         merged, merge_err = self.worktree_mgr.merge_worktree(agent_id, target_branch=target_branch)
         if not merged:
             actor.state = SwarmAgentState.FAILED

@@ -226,28 +226,26 @@ class GeminiClient:
     # 3. Orchestrator: Task Decomposition
     # ------------------------------------------------------------------
 
-    ORCHESTRATOR_SYSTEM = """You are Astra, the Causa swarm orchestrator.
-Given a user goal, decompose it into concrete subtasks for a coding agent swarm.
+    ORCHESTRATOR_SYSTEM = """You are Astra, the elite Causa swarm orchestrator (like ClaudeCode/v0).
+Given a user goal, you MUST decompose it into a massive, highly granular, parallelized subtask DAG for a coding agent swarm. 
 
-Rules:
-- Each subtask MUST have:
+CRITICAL DIRECTIVES:
+1. NEVER limit yourself to 5 agents. Complex apps require 10-25 subtasks! (e.g., separate tasks for App.jsx, Header.jsx, Sidebar.jsx, AuthStore.js, ThemeProvider.jsx, ApiUtils.js, tests for each).
+2. Decompose into the smallest possible atomic units to maximize parallel swarm execution.
+3. Each subtask MUST have:
   * id: "sub_1", "sub_2", etc.
   * title: short descriptive name
-  * description: clear engineering prompt specifying what functions, classes, or markup to write
+  * description: explicit, highly detailed engineering prompt. If it's a UI component, explicitly demand beautiful, modern design, Lucide icons, and fluid animations.
   * tier: orchestrator | worker | fast | nano
-  * target_file: exact relative path (e.g. "index.html", "src/App.jsx", "src/components/Timer.jsx", "tests/timer.test.js")
+  * target_file: exact relative path (e.g., "src/components/Sidebar.jsx")
   * dependencies: array of predecessor task IDs (e.g. ["sub_1"]) or empty [] for root tasks.
-- DEPENDENCY RULES:
-  * Root tasks (e.g. sub_1 core data/state or index.html) have dependencies: []
-  * Components that use sub_1 must list ["sub_1"] in dependencies.
-  * Unit tests and integration tasks MUST list their implementation predecessors in dependencies.
-- WEB APPLICATION / WEBSITE RULES:
-  * If the user requests a website, web app, frontend, game, landing page, or tool, you MUST ALWAYS include:
-    1. index.html (the HTML5 entrypoint with root div, modern responsive styling, and script tags)
-    2. src/App.jsx or src/App.tsx (the main application component with full UI state)
-    3. Additional components, styling, or logic modules
-    4. Unit test file (e.g. tests/app.test.js)
-  * Never generate only a single isolated utility file for a web project!
+4. DEPENDENCY RULES:
+  * Root tasks (e.g., stores, configs, index.html) have dependencies: []
+  * Granular UI components wait for stores/configs.
+  * The main App.jsx waits for all UI components.
+5. WEB APPLICATION / UI EXCELLENCE:
+  * You MUST scaffold a production-grade architecture (hooks, contexts, utils, components).
+  * Always include a beautiful, modern index.html entrypoint.
 - Return ONLY valid JSON. No markdown fences.
 - Format: {"subtasks": [{"id": "sub_1", "title": "...", "description": "...", "tier": "...", "target_file": "...", "dependencies": []}]}"""
 
@@ -255,47 +253,47 @@ Rules:
         """Use the ORCHESTRATOR model to decompose a user goal into subtasks."""
         result = self.generate_for_tier(
             tier=GeminiTier.ORCHESTRATOR,
-            prompt=f"Goal: {goal}\n\nDecompose into 3-6 subtasks as JSON respecting dependencies and web entrypoints.",
+            prompt=f"Goal: {goal}\n\nDecompose into as many subtasks as needed (10-25 for full apps) as JSON respecting dependencies and web entrypoints.",
             system_prompt=self.ORCHESTRATOR_SYSTEM,
             max_tokens=4096,
             temperature=0.1,
         )
         if not result.success:
             return {"subtasks": [], "error": result.error}
-        # Extract JSON from response
+        # Extract JSON from response robustly
         text = result.response_text.strip()
-        # Remove markdown code fences if present
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:-1])
         try:
-            plan = json.loads(text)
-            plan["orchestrator_model"] = result.model
-            plan["orchestrator_tokens"] = result.total_tokens
-            plan["orchestrator_cost_usd"] = result.cost_usd
-            return plan
-        except json.JSONDecodeError:
-            import re
-            match = re.search(r"\{.*\}", text, re.DOTALL)
-            if match:
-                try:
-                    plan = json.loads(match.group(0))
-                    plan["orchestrator_model"] = result.model
-                    return plan
-                except Exception:
-                    pass
-            return {"subtasks": [], "error": "Failed to parse orchestrator JSON", "raw": text[:500]}
+            start_idx = text.find('{')
+            end_idx = text.rfind('}')
+            if start_idx != -1 and end_idx != -1:
+                json_str = text[start_idx:end_idx+1]
+                plan = json.loads(json_str)
+                plan["orchestrator_model"] = result.model
+                plan["orchestrator_tokens"] = result.total_tokens
+                plan["orchestrator_cost_usd"] = result.cost_usd
+                return plan
+        except Exception as e:
+            return {"subtasks": [], "error": f"Failed to parse orchestrator JSON: {str(e)}", "raw": text[:500]}
+        
+        return {"subtasks": [], "error": "No JSON object found in response", "raw": text[:500]}
 
     # ------------------------------------------------------------------
     # 4. Worker: Code Generation
     # ------------------------------------------------------------------
 
-    CODE_GEN_SYSTEM = """You are an expert software engineer in the Causa coding harness.
-Write complete, production-ready, fully functional code.
-OUTPUT ONLY the file contents. No markdown fences (no ```). No conversational explanations.
-Start directly from line 1 of the file. Include all imports, styles, and full logic.
-If target file is index.html: write complete HTML5 with <!DOCTYPE html>, modern embedded CSS (clean, responsive, dark/modern design), and script tags so the page can be opened and run immediately in any browser!
-If target file is a test: import the real functions/components from existing files and write comprehensive assertions."""
+    CODE_GEN_SYSTEM = """You are an elite, world-class frontend engineer and UI/UX designer (like Claude Design / v0).
+Your goal is to write breathtaking, production-ready, fully functional code. 
+NEVER output generic, basic, or ugly boilerplate (like "Welcome to App"). 
+CRITICAL DESIGN DIRECTIVES:
+1. VISUAL EXCELLENCE: Use modern, sophisticated design patterns. Implement deep, rich dark modes or crisp, high-contrast light modes. 
+2. TYPOGRAPHY & SPACING: Use generous padding, rounded corners (xl or 2xl), subtle borders, and beautiful typography (sans-serif, inter).
+3. ICONS & MICROINTERACTIONS: Always integrate `lucide-react` for iconography. Add hover states, active states, and fluid transitions (CSS transitions or framer-motion).
+4. ARCHITECTURE: Write clean, modular, scalable React/JS/TS code. Use modern hooks and clean state management.
+5. NO PLACEHOLDERS: Implement the actual requested functionality completely. No 'TODO's. 
+OUTPUT FORMAT:
+- OUTPUT ONLY the file contents. No markdown fences (no ```). No conversational explanations.
+- Start directly from line 1 of the file. Include all imports, styles, and full logic.
+- If target file is index.html: write complete HTML5 with <!DOCTYPE html>, Tailwind CSS via CDN (or beautiful custom CSS), Lucide icons via CDN, and a stunning background/layout."""
 
     def generate_code(
         self,
@@ -331,7 +329,7 @@ If target file is a test: import the real functions/components from existing fil
             tier=tier,
             prompt=prompt,
             system_prompt=self.CODE_GEN_SYSTEM,
-            max_tokens=8192,
+            max_tokens=32768,
             temperature=0.15,
         )
 
